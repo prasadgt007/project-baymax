@@ -1,0 +1,46 @@
+---
+config:
+  flowchart:
+    curve: linear
+---
+graph TD;
+	__start__([Start]):::first
+	supervisor(Supervisor Agent)
+	greeting(Greeting Agent)
+	guardrail(Guardrail Agent)
+	history(Patient History Agent)
+	symptom(Symptom Agent)
+	risk(Risk Agent)
+	guidance(Guidance Agent)
+	compliance(Compliance Agent)
+	scheduling(Scheduling Agent)
+	__end__([End]):::last
+
+	__start__ --> supervisor;
+
+	%% Conditional Routing from Supervisor
+	supervisor -.->|chitchat| greeting;
+	supervisor -.->|out_of_scope| guardrail;
+	supervisor -.->|scheduling| scheduling;
+	supervisor -.->|medical / default| history;
+
+	%% Medical Triage Pipeline
+	history --> symptom;
+	symptom --> risk;
+
+	%% Conditional Routing from Risk Agent
+	risk -.->|high risk / escalate| scheduling;
+	risk -.->|low risk| guidance;
+
+	%% Guidance & Compliance Pipeline
+	guidance --> compliance;
+	compliance --> __end__;
+
+	%% Terminal Nodes
+	scheduling --> __end__;
+	greeting --> __end__;
+	guardrail --> __end__;
+
+	classDef default fill:#f2f0ff,stroke:#6c5ce7,stroke-width:2px,line-height:1.2;
+	classDef first fill:#e8f4fd,stroke:#0984e3,stroke-width:2px;
+	classDef last fill:#bfb6fc,stroke:#6c5ce7,stroke-width:2px;
