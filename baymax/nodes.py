@@ -140,6 +140,7 @@ def scheduling_agent(state: BaymaxState, config: RunnableConfig) -> Dict[str, An
     """Books an appointment on Google Calendar using Composio."""
     try:
         import os
+        # Ensure env vars are loaded (handles cold-start in some runtimes)
         if not os.environ.get("COMPOSIO_API_KEY"):
             from dotenv import load_dotenv
             load_dotenv()
@@ -148,31 +149,27 @@ def scheduling_agent(state: BaymaxState, config: RunnableConfig) -> Dict[str, An
         from composio_langchain import LangchainProvider
         from langgraph.prebuilt import create_react_agent
         from langchain_core.messages import HumanMessage
-        
-        # Initialize Composio with the LangchainProvider.
-        # When a provider is set, tools.get() returns pre-wrapped
-        # LangChain StructuredTool objects — no manual wrapping needed.
+
+        # --- Composio v3: Every tool execution is tied to an Entity (user_id). ---
+        # The user_id is the entity under which Google Calendar was connected.
+        # Use `uv run python check_composio.py` to rediscover it if needed.
+        composio_user_id = os.environ.get("COMPOSIO_USER_ID")
+        if not composio_user_id:
+            return {
+                "final_response": (
+                    "⚠️ Scheduling is not configured: COMPOSIO_USER_ID is missing from .env. "
+                    "Run `uv run python check_composio.py` to find your entity ID, "
+                    "then add COMPOSIO_USER_ID=<your_entity_id> to .env."
+                )
+            }
+
+        print(f"[Scheduling] Using Composio user_id: {composio_user_id}")
+
+        # Initialize Composio with LangchainProvider so tools.get() returns
+        # pre-wrapped LangChain StructuredTool objects.
         provider = LangchainProvider()
         composio_client = Composio(provider=provider)
-        
-        # Dynamically resolve the Composio user_id for the connected Google Calendar account.
-        # The connection was registered under a specific user_id during `composio add`,
-        # so we must use that same ID when fetching tools.
-        composio_user_id = os.environ.get("COMPOSIO_USER_ID", None)
-        if not composio_user_id:
-            try:
-                conns = composio_client.connected_accounts.list()
-                for acct in conns.items:
-                    if hasattr(acct, 'toolkit') and 'googlecalendar' in str(acct.toolkit).lower() and acct.status == 'ACTIVE':
-                        composio_user_id = acct.user_id
-                        break
-            except Exception:
-                pass
-        if not composio_user_id:
-            composio_user_id = "default"
-        
-        print(f"[Scheduling] Using Composio user_id: {composio_user_id}")
-        
+
         try:
             tools = composio_client.tools.get(
                 user_id=composio_user_id,
@@ -185,65 +182,84 @@ def scheduling_agent(state: BaymaxState, config: RunnableConfig) -> Dict[str, An
             return {
                 "final_response": f"{prefix}Error loading calendar tools: {tool_err}. Please proceed to the clinic directly if this is an emergency."
             }
-        
-        # Use langgraph's create_react_agent (replaces deprecated AgentExecutor)
+        # Pre-compute all datetime values in Python so the LLM never has to do datetime math.
+        # The tool explicitly rejects natural language — we give it exact ISO strings.
         agent = create_react_agent(llm, tools=tools)
-        
-        # Provide the current date/time so the LLM can resolve natural language dates
+
         from datetime import datetime, timedelta
+        import re
+
+
         now = datetime.now()
         tomorrow = now + timedelta(days=1)
-        current_iso = now.strftime("%Y-%m-%dT%H:%M:%S")
-        tomorrow_iso = tomorrow.strftime("%Y-%m-%dT%H:%M:%S")
         timezone = "Asia/Kolkata"
-        
-        date_context = (
-            f"IMPORTANT DATE CONTEXT: The current date and time is {current_iso} ({timezone}). "
-            f"'Tomorrow' means {tomorrow.strftime('%Y-%m-%d')}. "
-            f"You MUST convert ALL natural language dates/times into ISO 8601 format (e.g., '{tomorrow_iso}') "
-            f"before passing them to the tool's start_datetime parameter. "
-            f"The timezone is {timezone}. "
-            f"Examples: 'tomorrow at 2 PM' = '{tomorrow.strftime('%Y-%m-%d')}T14:00:00', "
-            f"'today at 5 PM' = '{now.strftime('%Y-%m-%d')}T17:00:00', "
-            f"'next Monday at 9 AM' = calculate from current date."
-        )
-        
-        # Adjust instructions based on whether this is an emergency escalation or a direct request
+
+        # Attempt to extract a requested time from user input (e.g. "4pm", "10:30 AM", "14:00")
         user_req = state.get("user_input", "")
+        requested_start = None
+        time_pattern = re.compile(
+            r'\b(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b', re.IGNORECASE
+        )
+        match = time_pattern.search(user_req)
+        if match:
+            hour = int(match.group(1))
+            minute = int(match.group(2)) if match.group(2) else 0
+            meridiem = match.group(3).lower()
+            if meridiem == "pm" and hour != 12:
+                hour += 12
+            elif meridiem == "am" and hour == 12:
+                hour = 0
+            # Default to tomorrow if user said "tomorrow", else today
+            base_day = tomorrow if "tomorrow" in user_req.lower() else now
+            requested_start = base_day.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        else:
+            # No time found — default to tomorrow 10 AM
+            requested_start = tomorrow.replace(hour=10, minute=0, second=0, microsecond=0)
+
+        start_iso = requested_start.strftime("%Y-%m-%dT%H:%M:%S")
+        # Default duration: 1 hour
+        end_iso = (requested_start + timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%S")
+
+        # Adjust instructions based on risk escalation vs. direct scheduling request
         if state.get("risk_flag"):
+            emergency_start = tomorrow.replace(hour=10, minute=0, second=0, microsecond=0)
+            emergency_end = (emergency_start + timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%S")
+            emergency_start_iso = emergency_start.strftime("%Y-%m-%dT%H:%M:%S")
             instructions = (
-                "You are a medical scheduling assistant. "
-                f"{date_context} "
-                f"Book an appointment for patient ID: {state.get('patient_id')}. "
-                f"The appointment should be tomorrow ({tomorrow.strftime('%Y-%m-%d')}) at 10:00 AM. "
-                f"Use start_datetime='{tomorrow.strftime('%Y-%m-%d')}T10:00:00'. "
-                "Title it 'Emergency Medical Consultation'. "
-                "CRITICAL: Do NOT offer any medical advice or remedies."
+                f"Call GOOGLECALENDAR_CREATE_EVENT with these EXACT parameters:\n"
+                f'  summary: "Emergency Medical Consultation - Patient {state.get("patient_id")}"\n'
+                f'  start_datetime: "{emergency_start_iso}"\n'
+                f'  end_datetime: "{emergency_end}"\n'
+                f'  description: "High-priority medical appointment. Patient requires immediate doctor attention."\n'
+                f'  calendar_id: "primary"\n'
+                f"Do NOT change any values. Do NOT interpret dates. Pass these exact strings."
             )
         else:
             instructions = (
-                "You are a helpful medical scheduling assistant. "
-                f"{date_context} "
-                f"The user requested: '{user_req}'. "
-                f"Book an appointment for patient ID: {state.get('patient_id')} matching their request. "
-                f"If they didn't specify a time, use start_datetime='{tomorrow.strftime('%Y-%m-%d')}T10:00:00'. "
-                "Title it 'Medical Consultation'. "
-                "CRITICAL: If scheduling fails, strictly state that it failed. Under NO circumstances should you provide medical advice, remedies, or general guidance."
+                f"Call GOOGLECALENDAR_CREATE_EVENT with these EXACT parameters:\n"
+                f'  summary: "Medical Consultation - Patient {state.get("patient_id")}"\n'
+                f'  start_datetime: "{start_iso}"\n'
+                f'  end_datetime: "{end_iso}"\n'
+                f'  description: "Appointment requested by patient. User request: {user_req}"\n'
+                f'  calendar_id: "primary"\n'
+                f"Do NOT change any values. Do NOT interpret dates. Pass these exact strings to the tool."
             )
-        
+
+        print(f"[Scheduling] Resolved start_datetime={start_iso}, end_datetime={end_iso}")
         print(f"[Scheduling] Invoking react agent with instructions...")
         response = agent.invoke({"messages": [HumanMessage(content=instructions)]}, config)
-        
+
         # Print all messages for debugging
         for i, msg in enumerate(response["messages"]):
             print(f"[Scheduling] Message {i} ({type(msg).__name__}): {msg.content[:200] if msg.content else '(no content)'}")
-        
+
         output = response["messages"][-1].content
-        
+
         prefix = "⚠️ High risk detected. " if state.get("risk_flag") else "📅 "
         return {
-            "final_response": f"{prefix}Scheduled an appointment via Composio.\nDetails: {output}"
+            "final_response": f"{prefix}Appointment scheduled via Google Calendar.\nDetails: {output}"
         }
+
     except Exception as e:
         import traceback
         print(f"[Scheduling] EXCEPTION: {traceback.format_exc()}")

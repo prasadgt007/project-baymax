@@ -11,3 +11,10 @@ wheels/
 
 # Environment variables — never commit real secrets
 .env
+
+# Node / JS dependencies and builds
+node_modules/
+**/node_modules/
+dist/
+build/
+.agents/

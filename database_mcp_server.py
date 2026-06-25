@@ -1,15 +1,47 @@
+"""
+database_mcp_server.py
+───────────────────────
+MCP server for Project Baymax patient data.
+
+Exclusively uses Supabase/pgvector via asynchronous psycopg3.
+Tools exposed via MCP (FastMCP / stdio):
+  - get_patient_profile(patient_id)
+  - search_interactions(patient_id, query, limit=3)
+"""
+
 import json
+import os
+import sys
+import asyncio
+
+if sys.platform == 'win32':
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
 from mcp.server.fastmcp import FastMCP
 from pydantic import BaseModel, Field
-from typing import List, Optional
+from typing import List
 from langchain_nvidia_ai_endpoints import NVIDIAEmbeddings
 from dotenv import load_dotenv
+import psycopg
+from pgvector.psycopg import register_vector_async
 
 load_dotenv()
 
-# We still use the embedder to do local in-memory semantic search!
-embedder = NVIDIAEmbeddings(model="nvidia/nv-embedqa-e5-v5")
+# ── Embedder — lazy init so startup is instant (no API call on import) ───────
+_embedder = None
 
+def get_embedder():
+    global _embedder
+    if _embedder is None:
+        _embedder = NVIDIAEmbeddings(model="nvidia/nv-embedqa-e5-v5")
+    return _embedder
+
+# ── Ensure Supabase URI is set ──────────────────────────────────────────────
+_db_uri = os.environ.get("SUPABASE_DB_URI", "")
+if not _db_uri or "YOUR_PROJECT_REF" in _db_uri:
+    print("[DB][ERROR] SUPABASE_DB_URI is missing or invalid in .env", file=sys.stderr, flush=True)
+
+# ── Pydantic models ──────────────────────────────────────────────────────────
 class PatientHistory(BaseModel):
     patient_id: str
     past_conditions: List[str] = Field(default_factory=list)
@@ -27,88 +59,97 @@ class PatientProfile(BaseModel):
     history: PatientHistory
     past_interactions: List[Interaction] = Field(default_factory=list)
 
-MOCK_PATIENTS = {
-    "P001": PatientProfile(
-        patient_id="P001",
-        name="John Doe",
-        age=45,
-        history=PatientHistory(
-            patient_id="P001",
-            past_conditions=["Hypertension", "Asthma"],
-            allergies=["Penicillin"],
-            current_medications=["Lisinopril", "Albuterol Inhaler"]
-        ),
-        past_interactions=[
-            Interaction(date="2023-01-15", notes="Routine checkup. BP stable."),
-            Interaction(date="2023-05-20", notes="Complained of mild shortness of breath. Recommended continuing inhaler."),
-            Interaction(date="2023-11-02", notes="Reported chest tightness during exercise. Scheduled stress test."),
-            Interaction(date="2024-02-14", notes="Follow-up on asthma. Lungs clear today.")
-        ]
-    ),
-    "P002": PatientProfile(
-        patient_id="P002",
-        name="Jane Smith",
-        age=30,
-        history=PatientHistory(
-            patient_id="P002",
-            past_conditions=["Migraines"],
-            allergies=[],
-            current_medications=["Ibuprofen as needed"]
-        ),
-        past_interactions=[
-            Interaction(date="2023-08-10", notes="Discussed frequency of migraines. Advised keeping a trigger journal."),
-            Interaction(date="2024-01-05", notes="Migraines improved. Prescribed sumatriptan for acute attacks.")
-        ]
-    )
-}
+# ── Supabase Async Helpers ───────────────────────────────────────────────────
+async def _get_supabase_conn():
+    """Open an async psycopg3 connection with pgvector support registered."""
+    print("[DB] Connecting to Supabase (Async)...", file=sys.stderr, flush=True)
+    conn = await psycopg.AsyncConnection.connect(_db_uri, connect_timeout=10)
+    await register_vector_async(conn)
+    print("[DB] Connected OK.", file=sys.stderr, flush=True)
+    return conn
 
-mcp = FastMCP("BaymaxMockDatabase")
+# ── MCP server ───────────────────────────────────────────────────────────────
+mcp = FastMCP("BaymaxDatabase")
 
 @mcp.tool()
-def get_patient_profile(patient_id: str) -> str:
-    """Retrieve patient profile from the mock database as a JSON string."""
-    profile = MOCK_PATIENTS.get(patient_id)
-    if not profile:
+async def get_patient_profile(patient_id: str) -> str:
+    """Retrieve patient profile (history, medications, allergies) as JSON."""
+    if not _db_uri:
         return "{}"
-    return profile.model_dump_json()
+        
+    try:
+        conn = await _get_supabase_conn()
+        async with conn:
+            async with conn.cursor() as cur:
+                # Fetch main patient row
+                await cur.execute(
+                    "SELECT patient_id, name, age, past_conditions, allergies, current_medications "
+                    "FROM patients WHERE patient_id = %s;",
+                    (patient_id,)
+                )
+                row = await cur.fetchone()
+                if not row:
+                    return "{}"
 
-def cosine_similarity(v1, v2):
-    import math
-    dot = sum(x*y for x, y in zip(v1, v2))
-    mag1 = math.sqrt(sum(x*x for x in v1))
-    mag2 = math.sqrt(sum(y*y for y in v2))
-    if mag1 == 0 or mag2 == 0:
-        return 0.0
-    return dot / (mag1 * mag2)
+                pid, name, age, conditions, allergies, meds = row
+
+                # Fetch past interactions (no vector needed here)
+                await cur.execute(
+                    "SELECT interaction_date::text, notes "
+                    "FROM patient_interactions "
+                    "WHERE patient_id = %s "
+                    "ORDER BY interaction_date;",
+                    (patient_id,)
+                )
+                interactions_rows = await cur.fetchall()
+                interactions = [{"date": r[0], "notes": r[1]} for r in interactions_rows]
+
+                profile = {
+                    "patient_id": pid,
+                    "name": name,
+                    "age": age,
+                    "history": {
+                        "patient_id": pid,
+                        "past_conditions": list(conditions or []),
+                        "allergies": list(allergies or []),
+                        "current_medications": list(meds or []),
+                    },
+                    "past_interactions": interactions,
+                }
+                return json.dumps(profile)
+    except Exception as e:
+        print(f"[DB][Supabase] get_patient_profile error: {e}", file=sys.stderr, flush=True)
+        return "{}"
 
 @mcp.tool()
-def search_interactions(patient_id: str, query: str, limit: int = 3) -> str:
-    """Search a patient's past interactions using local in-memory semantic search."""
-    profile = MOCK_PATIENTS.get(patient_id)
-    if not profile or not profile.past_interactions:
+async def search_interactions(patient_id: str, query: str, limit: int = 3) -> str:
+    """Semantic search over a patient's past interaction notes using embeddings."""
+    if not _db_uri:
         return "[]"
-    
+        
     try:
-        # Embed the query
-        query_embedding = embedder.embed_query(query)
+        # Note: LangChain embedders are generally synchronous, run it directly
+        query_embedding = get_embedder().embed_query(query)
         
-        # We will embed each interaction note on the fly for testing
-        # In a real app, these are pre-computed in pgvector.
-        scored_interactions = []
-        for interaction in profile.past_interactions:
-            note_embedding = embedder.embed_query(interaction.notes)
-            score = cosine_similarity(query_embedding, note_embedding)
-            scored_interactions.append((score, interaction))
-            
-        # Sort by highest similarity
-        scored_interactions.sort(key=lambda x: x[0], reverse=True)
-        
-        # Take top 'limit'
-        top_interactions = [ix.model_dump() for score, ix in scored_interactions[:limit]]
-        return json.dumps(top_interactions)
-        
+        conn = await _get_supabase_conn()
+        async with conn:
+            async with conn.cursor() as cur:
+                # Use cosine distance operator (<=>). Lower = more similar.
+                await cur.execute(
+                    """
+                    SELECT interaction_date::text, notes
+                    FROM patient_interactions
+                    WHERE patient_id = %s AND embedding IS NOT NULL
+                    ORDER BY embedding <=> %s::vector
+                    LIMIT %s;
+                    """,
+                    (patient_id, query_embedding, limit)
+                )
+                rows = await cur.fetchall()
+                results = [{"date": r[0], "notes": r[1]} for r in rows]
+                return json.dumps(results)
     except Exception as e:
-        print(f"Error during in-memory semantic search: {e}")
+        print(f"[DB][Supabase] search_interactions error: {e}", file=sys.stderr, flush=True)
         return "[]"
 
 if __name__ == "__main__":

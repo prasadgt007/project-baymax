@@ -1,4 +1,12 @@
 import sys
+import io
+
+# Force UTF-8 output to avoid UnicodeEncodeError on Windows cp1252 terminals
+if sys.stdout.encoding != 'utf-8':
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+if sys.stderr.encoding != 'utf-8':
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
+
 from dotenv import load_dotenv
 
 # Load environment variables

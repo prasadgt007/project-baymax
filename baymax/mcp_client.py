@@ -1,9 +1,18 @@
 import asyncio
 import os
+import sys
 import json
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from .models import PatientProfile
+
+# Resolve the venv Python so the MCP server subprocess has all packages available
+_VENV_PYTHON = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    ".venv", "Scripts", "python.exe"
+)
+# Fall back to the current interpreter if the venv path doesn't exist
+_PYTHON = _VENV_PYTHON if os.path.exists(_VENV_PYTHON) else sys.executable
 
 # Synchronous wrapper for MCP client
 def fetch_patient_profile_mcp(patient_id: str):
@@ -12,9 +21,9 @@ def fetch_patient_profile_mcp(patient_id: str):
         server_path = os.path.join(base_dir, "database_mcp_server.py")
         
         server_params = StdioServerParameters(
-            command="python",
+            command=_PYTHON,
             args=[server_path],
-            env=None
+            env=dict(os.environ)  # pass full env so SUPABASE_DB_URI / API keys are available
         )
         
         async with stdio_client(server_params) as (read, write):
@@ -40,9 +49,9 @@ def search_interactions_mcp(patient_id: str, query: str, limit: int = 3):
         server_path = os.path.join(base_dir, "database_mcp_server.py")
         
         server_params = StdioServerParameters(
-            command="python",
+            command=_PYTHON,
             args=[server_path],
-            env=None
+            env=dict(os.environ)  # pass full env so SUPABASE_DB_URI / API keys are available
         )
         
         async with stdio_client(server_params) as (read, write):
