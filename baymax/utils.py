@@ -7,8 +7,8 @@ def load_skills(file_path: str = "skills.md") -> dict:
     current_prompt = []
     
     # Resolve absolute path relative to project root
-    # Since utils.py is in baymax/, skills.md is in Project_Baymax/
-    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    # Since utils.py is in baymax/, and skills.md is now also in baymax/
+    base_dir = os.path.dirname(os.path.abspath(__file__))
     full_path = os.path.join(base_dir, file_path)
     
     if not os.path.exists(full_path):
