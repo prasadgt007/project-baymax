@@ -33,7 +33,11 @@ def load_skills(file_path: str = "skills.md") -> dict:
         
     return skills
 
+_SKILLS_CACHE: dict = {}
+
 def get_skill(agent_name: str) -> str:
     """Helper to fetch a single agent's prompt."""
-    skills = load_skills()
-    return skills.get(agent_name, f"You are a helpful {agent_name}.")
+    global _SKILLS_CACHE
+    if not _SKILLS_CACHE:
+        _SKILLS_CACHE = load_skills()
+    return _SKILLS_CACHE.get(agent_name, f"You are a helpful {agent_name}.")

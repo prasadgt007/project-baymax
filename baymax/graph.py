@@ -1,85 +1,43 @@
-from typing import Dict, Any, Literal
+"""
+graph.py
+────────
+Builds and compiles the LangGraph for Project Baymax (DeepAgent Architecture).
+
+The graph is radically simplified:
+
+    Entry → baymax_agent → compliance_wrapper → END
+
+The DeepAgent internally handles ALL:
+  - Intent classification (no separate supervisor)
+  - RAG retrieval (via search_patient_records tool)
+  - Symptom triage (dynamic, not hard-coded turn counts)
+  - Risk assessment (embedded in the system prompt logic)
+  - Guidance generation (personalised using tool outputs)
+  - Appointment scheduling (via get_available_slots + book_appointment tools)
+"""
+
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
 from .models import BaymaxState
-from .nodes import (
-    supervisor_agent,
-    greeting_agent,
-    guardrail_agent,
-    symptom_agent,
-    history_agent,
-    risk_agent,
-    guidance_agent,
-    compliance_agent,
-    scheduling_agent
-)
+from .nodes import baymax_agent, compliance_wrapper
+
 
 def build_graph() -> StateGraph:
-    """Builds and compiles the LangGraph for Project Baymax."""
-    
-    # 1. Initialize StateGraph
+    """Builds and compiles the simplified DeepAgent LangGraph."""
+
     workflow = StateGraph(BaymaxState)
-    
-    # 2. Add nodes
-    workflow.add_node("supervisor", supervisor_agent)
-    workflow.add_node("greeting", greeting_agent)
-    workflow.add_node("guardrail", guardrail_agent)
-    workflow.add_node("history", history_agent)
-    workflow.add_node("symptom", symptom_agent)
-    workflow.add_node("risk", risk_agent)
-    workflow.add_node("guidance", guidance_agent)
-    workflow.add_node("compliance", compliance_agent)
-    workflow.add_node("scheduling", scheduling_agent)
-    
-    # 3. Define the edges
-    workflow.set_entry_point("supervisor")
-    
-    # Conditional routing from supervisor
-    def route_supervisor(state: BaymaxState) -> Literal["greeting", "history", "scheduling", "guardrail"]:
-        intent = state.get("intent")
-        if intent == "chitchat":
-            return "greeting"
-        elif intent == "scheduling":
-            return "scheduling"
-        elif intent == "out_of_scope":
-            return "guardrail"
-        return "history"
-        
-    workflow.add_conditional_edges(
-        "supervisor",
-        route_supervisor,
-        {
-            "greeting": "greeting",
-            "history": "history",
-            "scheduling": "scheduling",
-            "guardrail": "guardrail"
-        }
-    )
-    
-    workflow.add_edge("history", "symptom")
-    workflow.add_edge("symptom", "risk")
-    
-    # Conditional routing after Risk Agent
-    def route_risk(state: BaymaxState) -> Literal["scheduling", "guidance"]:
-        if state.get("risk_flag"):
-            # If high risk, bypass guidance and go to scheduling
-            return "scheduling"
-        return "guidance"
-        
-    workflow.add_conditional_edges(
-        "risk",
-        route_risk,
-        {
-            "scheduling": "scheduling",
-            "guidance": "guidance"
-        }
-    )
-    
-    workflow.add_edge("guidance", "compliance")
-    workflow.add_edge("compliance", END)
-    workflow.add_edge("scheduling", END)
-    workflow.add_edge("greeting", END)
-    workflow.add_edge("guardrail", END)
-    
+
+    # ── Add nodes ─────────────────────────────────────────────────────────────
+    workflow.add_node("baymax_agent", baymax_agent)
+    workflow.add_node("compliance_wrapper", compliance_wrapper)
+
+    # ── Entry point ───────────────────────────────────────────────────────────
+    workflow.set_entry_point("baymax_agent")
+
+    # ── Linear flow ───────────────────────────────────────────────────────────
+    workflow.add_edge("baymax_agent", "compliance_wrapper")
+    workflow.add_edge("compliance_wrapper", END)
+
+    # ── Compile with memory for multi-turn conversations ──────────────────────
     memory = MemorySaver()
     return workflow.compile(checkpointer=memory)

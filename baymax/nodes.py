@@ -1,270 +1,289 @@
+"""
+nodes.py
+────────
+LangGraph agent nodes for Project Baymax (DeepAgent Architecture).
+
+There are only two nodes:
+  1. baymax_agent   — The DeepAgent node. Uses create_deep_agent with
+                      NVIDIA Llama 3.3 70B, 7 medical tools, and a unified
+                      system prompt. Handles ALL routing, triage, RAG retrieval,
+                      guidance, and scheduling through its ReAct tool-calling loop.
+  2. compliance_wrapper — Deterministic post-processing that appends the medical
+                          disclaimer to every response.
+"""
+
 import os
 from typing import Dict, Any
-from langchain_core.runnables import RunnableConfig
+from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 from langchain_nvidia_ai_endpoints import ChatNVIDIA
-from langchain_core.prompts import ChatPromptTemplate
-from .models import BaymaxState, Symptom, RouterIntent
-from .utils import get_skill
+from deepagents import create_deep_agent
+from langgraph.checkpoint.memory import MemorySaver
+from .models import BaymaxState
+from .tools import create_baymax_tools
 
-# Use MCP client for database
-from .mcp_client import fetch_patient_profile_mcp
 
-llm = ChatNVIDIA(model="meta/llama-3.1-8b-instruct")
+# ── LLM ──────────────────────────────────────────────────────────────────────
+# Initialize LLM with 70B model for reliable tool calling
+llm = ChatNVIDIA(model="meta/llama-3.1-70b-instruct")
 
-def supervisor_agent(state: BaymaxState, config: RunnableConfig) -> Dict[str, Any]:
-    """Strictly classifies the user's intent to act as a router."""
+# ── System Prompt ─────────────────────────────────────────────────────────────
+_SYSTEM_PROMPT_CACHE = None
+
+
+def _load_system_prompt() -> str:
+    """Load the unified system prompt from skills.md (cached)."""
+    global _SYSTEM_PROMPT_CACHE
+    if _SYSTEM_PROMPT_CACHE is None:
+        skills_path = os.path.join(os.path.dirname(__file__), "skills.md")
+        with open(skills_path, "r", encoding="utf-8") as f:
+            _SYSTEM_PROMPT_CACHE = f.read()
+    return _SYSTEM_PROMPT_CACHE
+
+
+def _build_contextual_prompt(baseline: dict | None) -> str:
+    """
+    Build the full system prompt by injecting the patient's baseline context
+    into the core prompt. This ensures the DeepAgent knows the patient's
+    name, conditions, allergies, and recent documents from the very first turn.
+    """
+    base_prompt = _load_system_prompt()
+
+    if not baseline or not baseline.get("profile"):
+        return base_prompt
+
+    profile = baseline["profile"]
+    name = profile.get("name", "Patient")
+    age = profile.get("age", "Unknown")
+    conditions = profile.get("past_conditions", [])
+    allergies = profile.get("allergies", [])
+    meds = profile.get("current_medications", [])
+
+    context_block = (
+        f"\n\n## Current Patient Context\n"
+        f"- **Name:** {name}\n"
+        f"- **Age:** {age}\n"
+        f"- **Known Conditions:** {', '.join(conditions) if conditions else 'None on record'}\n"
+        f"- **Allergies:** {', '.join(allergies) if allergies else 'None known'}\n"
+        f"- **Current Medications:** {', '.join(meds) if meds else 'None'}\n"
+    )
+
+    # Add baseline documents if available
+    baseline_docs = baseline.get("baseline_documents", [])
+    if baseline_docs:
+        context_block += "\n**Recent Documents on File:**\n"
+        for doc in baseline_docs:
+            doc_type = doc.get("document_type", "document")
+            date = doc.get("created_at", "Unknown")
+            content_preview = doc.get("content_text", "")[:200]
+            context_block += f"- [{doc_type}] ({date}): {content_preview}...\n"
+
+    # Add upcoming appointment if any
+    upcoming = baseline.get("upcoming_slot")
+    if upcoming:
+        context_block += f"\n**Upcoming Appointment:** {upcoming.get('label', 'Scheduled')}\n"
+
+    return base_prompt + context_block
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Node 1: Baymax DeepAgent — The Core Reasoning Engine
+# ─────────────────────────────────────────────────────────────────────────────
+
+def baymax_agent(state: BaymaxState) -> Dict[str, Any]:
+    """
+    The single DeepAgent node that replaces all previous agents.
+
+    Uses create_deep_agent with:
+      - NVIDIA Llama 3.3 70B (tool-calling capable)
+      - 5 patient-bound tools (search, profile, slots, book, brief)
+      - The unified system prompt with patient baseline injected
+
+    The agent internally runs a ReAct loop: think → call tool → observe →
+    think → ... → final response. LangGraph just needs to invoke it once.
+    """
+    patient_id = state.get("patient_id", "")
     user_input = state.get("user_input", "")
-    
-    # Force the LLM to output only the structured intent
-    structured_llm = llm.with_structured_output(RouterIntent)
-    
-    system_prompt = get_skill("Supervisor Agent")
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", system_prompt),
-        ("user", "{input}")
-    ])
-    
-    chain = prompt | structured_llm
-    
+    baseline = state.get("patient_baseline")
+    existing_messages = state.get("messages", [])
+
+    # Create patient-bound tools (patient_id injected via closure)
+    tools = create_baymax_tools(patient_id)
+
+    # Build the contextual system prompt
+    system_prompt = _build_contextual_prompt(baseline)
+
+    # Create the DeepAgent
+    agent = create_deep_agent(
+        model=llm,
+        tools=tools,
+        system_prompt=system_prompt,
+        checkpointer=False,  # We manage checkpointing at the outer graph level
+        name="baymax",
+    )
+
+    # Build message input for the agent
+    # Include conversation history so the agent has multi-turn context
+    input_messages = list(existing_messages) + [HumanMessage(content=user_input)]
+
     try:
-        intent_data = chain.invoke({"input": user_input}, config)
-        return {"intent": intent_data.intent}
-    except Exception as e:
-        # Fallback to medical if parsing fails to be safe
-        return {"intent": "medical"}
+        result = agent.invoke({"messages": input_messages})
 
-def greeting_agent(state: BaymaxState, config: RunnableConfig) -> Dict[str, Any]:
-    """Handles chitchat and greeting without diagnosing."""
-    user_input = state.get("user_input", "")
-    
-    system_prompt = get_skill("Greeting Agent")
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", system_prompt),
-        ("user", "{input}")
-    ])
-    
-    chain = prompt | llm
-    response = chain.invoke({"input": user_input}, config)
-    
-    return {"final_response": response.content}
+        # Extract the final AI response from the agent's output
+        output_messages = result.get("messages", [])
+        final_text = ""
+        available_slots = []
+        brief = None
 
-def guardrail_agent(state: BaymaxState) -> Dict[str, Any]:
-    """Handles out-of-scope requests rigidly."""
-    return {"final_response": "I am Baymax, your personal healthcare companion. I can assist with symptom analysis, health triage, and medical appointment scheduling. However, I cannot assist you with off-topic requests like that."}
+        # Walk through output messages to find the final AI response
+        # and extract any structured data (slots, brief)
+        for msg in reversed(output_messages):
+            if isinstance(msg, AIMessage) and msg.content and not msg.tool_calls:
+                final_text = msg.content
+                break
 
-def symptom_agent(state: BaymaxState, config: RunnableConfig) -> Dict[str, Any]:
-    """Parses raw user input to structure symptoms."""
-    user_input = state.get("user_input", "")
-    
-    # We use LLM with structured output to get symptoms
-    structured_llm = llm.with_structured_output(Symptom)
-    
-    system_prompt = get_skill("Symptom Agent")
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", system_prompt),
-        ("user", "{input}")
-    ])
-    
-    chain = prompt | structured_llm
-    
-    try:
-        symptom_data = chain.invoke({"input": user_input}, config)
-        return {"structured_symptoms": [symptom_data]}
-    except Exception as e:
-        # Fallback if parsing fails
-        fallback_symptom = Symptom(name="Unknown", severity="Unknown", duration="Unknown")
-        return {"structured_symptoms": [fallback_symptom]}
+        if not final_text:
+            final_text = "I'm here to help. Could you tell me more about what you need?"
 
-def history_agent(state: BaymaxState) -> Dict[str, Any]:
-    """Fetches patient history based on patient_id via MCP Server."""
-    patient_id = state.get("patient_id")
-    profile = fetch_patient_profile_mcp(patient_id)
-    return {"patient_profile": profile}
+        # Check if slots were mentioned in tool calls (parse from tool results)
+        for msg in output_messages:
+            if hasattr(msg, "content") and isinstance(msg.content, str):
+                if "slot_id:" in msg.content and ("available" in msg.content.lower() or "appointment slots" in msg.content.lower()):
+                    # Extract slots from the tool output for frontend rendering
+                    try:
+                        _extract_slots_from_response(msg.content, available_slots)
+                    except Exception:
+                        pass
 
-def risk_agent(state: BaymaxState, config: RunnableConfig) -> Dict[str, Any]:
-    """Analyzes symptoms and history to flag required doctor escalation."""
-    symptoms = state.get("structured_symptoms", [])
-    profile = state.get("patient_profile")
-    
-    system_prompt = get_skill("Risk Agent")
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", system_prompt),
-        ("user", "Symptoms: {symptoms}\nPatient History: {history}")
-    ])
-    
-    chain = prompt | llm
-    response = chain.invoke({
-        "symptoms": [s.dict() for s in symptoms] if symptoms else "None",
-        "history": profile.history.dict() if profile else "Unknown"
-    }, config)
-    
-    content = response.content.strip().upper()
-    if "ESCALATE" in content:
-        return {
-            "risk_flag": True, 
-            "escalation_reason": "High risk symptoms detected requiring immediate medical attention."
-        }
-    return {"risk_flag": False, "escalation_reason": None}
+        # Check if a brief was generated
+        for msg in output_messages:
+            if hasattr(msg, "content") and isinstance(msg.content, str):
+                if "Pre-Consultation Brief" in msg.content:
+                    brief = msg.content
 
-def guidance_agent(state: BaymaxState, config: RunnableConfig) -> Dict[str, Any]:
-    """Suggests safe remedies if risk_flag is False."""
-    if state.get("risk_flag"):
-         return {"proposed_guidance": "Please consult a doctor immediately. We cannot provide remedies for this condition."}
-         
-    symptoms = state.get("structured_symptoms", [])
-    
-    system_prompt = get_skill("Guidance Agent")
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", system_prompt),
-        ("user", "Symptoms: {symptoms}")
-    ])
-    
-    chain = prompt | llm
-    response = chain.invoke({"symptoms": [s.dict() for s in symptoms] if symptoms else "None"}, config)
-    
-    return {"proposed_guidance": response.content}
-
-def compliance_agent(state: BaymaxState) -> Dict[str, Any]:
-    """Applies privacy and disclaimer rules to the final guidance."""
-    guidance = state.get("proposed_guidance", "")
-    
-    disclaimer = "\n\n*** Disclaimer: This information is for educational purposes only and does not substitute professional medical advice. ***"
-    
-    final_response = guidance + disclaimer
-    return {
-        "compliance_passed": True,
-        "final_response": final_response
-    }
-
-def scheduling_agent(state: BaymaxState, config: RunnableConfig) -> Dict[str, Any]:
-    """Books an appointment on Google Calendar using Composio."""
-    try:
-        import os
-        # Ensure env vars are loaded (handles cold-start in some runtimes)
-        if not os.environ.get("COMPOSIO_API_KEY"):
-            from dotenv import load_dotenv
-            load_dotenv()
-
-        from composio import Composio
-        from composio_langchain import LangchainProvider
-        from langgraph.prebuilt import create_react_agent
-        from langchain_core.messages import HumanMessage
-
-        # --- Composio v3: Every tool execution is tied to an Entity (user_id). ---
-        # The user_id is the entity under which Google Calendar was connected.
-        # Use `uv run python check_composio.py` to rediscover it if needed.
-        composio_user_id = os.environ.get("COMPOSIO_USER_ID")
-        if not composio_user_id:
-            return {
-                "final_response": (
-                    "⚠️ Scheduling is not configured: COMPOSIO_USER_ID is missing from .env. "
-                    "Run `uv run python check_composio.py` to find your entity ID, "
-                    "then add COMPOSIO_USER_ID=<your_entity_id> to .env."
-                )
-            }
-
-        print(f"[Scheduling] Using Composio user_id: {composio_user_id}")
-
-        # Initialize Composio with LangchainProvider so tools.get() returns
-        # pre-wrapped LangChain StructuredTool objects.
-        provider = LangchainProvider()
-        composio_client = Composio(provider=provider)
-
-        try:
-            tools = composio_client.tools.get(
-                user_id=composio_user_id,
-                tools=["GOOGLECALENDAR_CREATE_EVENT"]
-            )
-            print(f"[Scheduling] Loaded {len(tools)} tool(s): {[t.name for t in tools]}")
-        except Exception as tool_err:
-            print(f"[Scheduling] ERROR loading tools: {tool_err}")
-            prefix = "⚠️ High risk detected. " if state.get("risk_flag") else ""
-            return {
-                "final_response": f"{prefix}Error loading calendar tools: {tool_err}. Please proceed to the clinic directly if this is an emergency."
-            }
-        # Pre-compute all datetime values in Python so the LLM never has to do datetime math.
-        # The tool explicitly rejects natural language — we give it exact ISO strings.
-        agent = create_react_agent(llm, tools=tools)
-
-        from datetime import datetime, timedelta
+        # Clean the final text so the user doesn't see raw slot_ids
         import re
+        # Remove lines that are just slot_id
+        final_text = re.sub(r"\n\s*slot_id:\s*[\w-]+", "", final_text)
+        # Remove inline slot_ids
+        final_text = re.sub(r"\(?slot_id:\s*[\w-]+\)?", "", final_text)
+        final_text = re.sub(r"\(\s*\)", "", final_text)
+        final_text = final_text.replace("  ", " ").strip()
 
-
-        now = datetime.now()
-        tomorrow = now + timedelta(days=1)
-        timezone = "Asia/Kolkata"
-
-        # Attempt to extract a requested time from user input (e.g. "4pm", "10:30 AM", "14:00")
-        user_req = state.get("user_input", "")
-        requested_start = None
-        time_pattern = re.compile(
-            r'\b(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b', re.IGNORECASE
-        )
-        match = time_pattern.search(user_req)
-        if match:
-            hour = int(match.group(1))
-            minute = int(match.group(2)) if match.group(2) else 0
-            meridiem = match.group(3).lower()
-            if meridiem == "pm" and hour != 12:
-                hour += 12
-            elif meridiem == "am" and hour == 12:
-                hour = 0
-            # Default to tomorrow if user said "tomorrow", else today
-            base_day = tomorrow if "tomorrow" in user_req.lower() else now
-            requested_start = base_day.replace(hour=hour, minute=minute, second=0, microsecond=0)
-        else:
-            # No time found — default to tomorrow 10 AM
-            requested_start = tomorrow.replace(hour=10, minute=0, second=0, microsecond=0)
-
-        start_iso = requested_start.strftime("%Y-%m-%dT%H:%M:%S")
-        # Default duration: 1 hour
-        end_iso = (requested_start + timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%S")
-
-        # Adjust instructions based on risk escalation vs. direct scheduling request
-        if state.get("risk_flag"):
-            emergency_start = tomorrow.replace(hour=10, minute=0, second=0, microsecond=0)
-            emergency_end = (emergency_start + timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%S")
-            emergency_start_iso = emergency_start.strftime("%Y-%m-%dT%H:%M:%S")
-            instructions = (
-                f"Call GOOGLECALENDAR_CREATE_EVENT with these EXACT parameters:\n"
-                f'  summary: "Emergency Medical Consultation - Patient {state.get("patient_id")}"\n'
-                f'  start_datetime: "{emergency_start_iso}"\n'
-                f'  end_datetime: "{emergency_end}"\n'
-                f'  description: "High-priority medical appointment. Patient requires immediate doctor attention."\n'
-                f'  calendar_id: "primary"\n'
-                f"Do NOT change any values. Do NOT interpret dates. Pass these exact strings."
-            )
-        else:
-            instructions = (
-                f"Call GOOGLECALENDAR_CREATE_EVENT with these EXACT parameters:\n"
-                f'  summary: "Medical Consultation - Patient {state.get("patient_id")}"\n'
-                f'  start_datetime: "{start_iso}"\n'
-                f'  end_datetime: "{end_iso}"\n'
-                f'  description: "Appointment requested by patient. User request: {user_req}"\n'
-                f'  calendar_id: "primary"\n'
-                f"Do NOT change any values. Do NOT interpret dates. Pass these exact strings to the tool."
-            )
-
-        print(f"[Scheduling] Resolved start_datetime={start_iso}, end_datetime={end_iso}")
-        print(f"[Scheduling] Invoking react agent with instructions...")
-        response = agent.invoke({"messages": [HumanMessage(content=instructions)]}, config)
-
-        # Print all messages for debugging
-        for i, msg in enumerate(response["messages"]):
-            print(f"[Scheduling] Message {i} ({type(msg).__name__}): {msg.content[:200] if msg.content else '(no content)'}")
-
-        output = response["messages"][-1].content
-
-        prefix = "⚠️ High risk detected. " if state.get("risk_flag") else "📅 "
         return {
-            "final_response": f"{prefix}Appointment scheduled via Google Calendar.\nDetails: {output}"
+            "messages": [HumanMessage(content=user_input), AIMessage(content=final_text)],
+            "final_response": final_text,
+            "available_slots": available_slots,
+            "pre_consultation_brief": brief,
         }
 
     except Exception as e:
-        import traceback
-        print(f"[Scheduling] EXCEPTION: {traceback.format_exc()}")
-        prefix = "⚠️ High risk detected. " if state.get("risk_flag") else ""
+        print(f"[BaymaxAgent] Error: {e}")
+        error_response = (
+            "I apologise, but I encountered an issue processing your request. "
+            "Could you please try rephrasing your message?"
+        )
         return {
-            "final_response": f"{prefix}Attempted to schedule an appointment but encountered an error: {str(e)}."
+            "messages": [HumanMessage(content=user_input), AIMessage(content=error_response)],
+            "final_response": error_response,
+            "available_slots": [],
+            "pre_consultation_brief": None,
         }
 
+
+def _extract_slots_from_response(tool_output: str, slots_list: list) -> None:
+    """
+    Parse slot data from the get_available_slots tool output.
+
+    New format (each slot is two lines):
+        1. 09:00 AM with Dr. Amanda Ross
+           slot_id: c5b1b270-853f-4cb8-b38b-08cb65253ae4
+
+    Also handles the old inline format:
+        • 2026-07-10 10:00 AM (ID: <uuid>)
+    """
+    import re
+
+    # Extract the day headers to build full labels
+    current_day = ""
+    lines = tool_output.split("\n")
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+
+        # Detect day headers like "**Monday, July 14:**"
+        day_match = re.match(r"\*\*(.+?):\*\*", stripped)
+        if day_match:
+            current_day = day_match.group(1).strip()
+            continue
+
+        # Detect slot_id lines
+        slot_id_match = re.match(r"slot_id:\s*([\w-]+)", stripped)
+        if slot_id_match:
+            slot_id = slot_id_match.group(1).strip()
+
+            # Look back at the previous non-empty line for the time label
+            time_label = ""
+            for j in range(i - 1, max(i - 3, -1), -1):
+                prev = lines[j].strip()
+                # Match numbered items like "1. 09:00 AM with Dr. Amanda Ross"
+                time_match = re.match(r"\d+\.\s*(.+)", prev)
+                if time_match:
+                    time_label = time_match.group(1).strip()
+                    break
+
+            full_label = f"{current_day} at {time_label}" if current_day and time_label else time_label or slot_id
+            slots_list.append({
+                "slot_id": slot_id,
+                "label": full_label,
+                "slot_datetime": "",
+                "duration_minutes": 60,
+            })
+            continue
+
+    # Fallback: old inline format "• label (ID: uuid)"
+    if not slots_list:
+        pattern = r"[•\-]\s*(.+?)\s*\(ID:\s*([\w-]+)\)"
+        for match in re.finditer(pattern, tool_output):
+            label = match.group(1).strip()
+            slot_id = match.group(2).strip()
+            slots_list.append({
+                "slot_id": slot_id,
+                "label": label,
+                "slot_datetime": "",
+                "duration_minutes": 60,
+            })
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Node 2: Compliance Wrapper — Deterministic Disclaimer
+# ─────────────────────────────────────────────────────────────────────────────
+
+def compliance_wrapper(state: BaymaxState) -> Dict[str, Any]:
+    """
+    Deterministic post-processing node that ensures the medical disclaimer
+    is appended to every response that contains health guidance.
+
+    This is NOT LLM-driven — it guarantees compliance regardless of the
+    agent's output.
+    """
+    response = state.get("final_response", "")
+
+    disclaimer = (
+        "\n\n---\n"
+        "*This information is for educational purposes only and does not substitute "
+        "professional medical advice. Always consult a qualified healthcare provider "
+        "before starting any treatment.*"
+    )
+
+    # Only append disclaimer to responses that contain medical content
+    # (skip for greetings, out-of-scope declines, booking confirmations, etc.)
+    medical_indicators = [
+        "remedy", "treatment", "medication", "symptom", "consult a doctor",
+        "condition", "recommend", "⚠️", "OTC", "over-the-counter",
+        "ibuprofen", "acetaminophen", "rest", "hydrat",
+    ]
+    contains_medical = any(indicator in response.lower() for indicator in medical_indicators)
+
+    if contains_medical and disclaimer.strip() not in response:
+        response = response + disclaimer
+
+    return {"final_response": response}
