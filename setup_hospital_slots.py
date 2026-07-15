@@ -52,6 +52,7 @@ def main():
             is_booked         BOOLEAN NOT NULL DEFAULT false,
             booked_patient_id TEXT REFERENCES patients(patient_id) ON DELETE SET NULL,
             doctor_name       TEXT NOT NULL DEFAULT 'Dr. Amanda Ross',
+            calendar_event_id TEXT,
             created_at        TIMESTAMPTZ DEFAULT NOW(),
 
             -- Prevent duplicate slots for the same datetime + doctor

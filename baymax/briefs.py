@@ -19,6 +19,7 @@ def generate_pre_consultation_brief(
     escalation_reason: str,
     clinical_context: List[dict] = None,
     appointment_datetime: str = "",
+    symptoms_summary: str = "",
 ) -> str:
     """
     Synthesises patient profile, current triage findings, and semantically
@@ -40,16 +41,22 @@ def generate_pre_consultation_brief(
     if clinical_context is None:
         clinical_context = []
 
+    # A brief is a full "Pre-Consultation Brief" only when symptoms were actually
+    # discussed this session. If the patient just booked an appointment without any
+    # triage, we produce a lighter history-only "Patient Summary" instead.
+    has_symptoms = bool((symptoms_summary or "").strip() or current_symptoms)
+    title = "Pre-Consultation Brief" if has_symptoms else "Patient Summary"
+
     profile = fetch_patient_profile_mcp(patient_id)
     if not profile:
         return (
-            f"## Pre-Consultation Brief\n\n"
+            f"## {title}\n\n"
             f"> Patient `{patient_id}` not found in the database.\n"
         )
 
     # ── Patient Identity Card ─────────────────────────────────────────────────
     lines = [
-        "## Pre-Consultation Brief",
+        f"## {title}",
         "",
         "### Patient Information",
         "",
@@ -74,7 +81,18 @@ def generate_pre_consultation_brief(
         "",
     ]
 
-    # ── Current Symptoms (if available) ───────────────────────────────────────
+    # ── Reason for Visit / Symptoms discussed this session ────────────────────
+    if symptoms_summary and symptoms_summary.strip():
+        lines += [
+            "---",
+            "",
+            "### Reason for Visit / Symptoms Discussed",
+            "",
+            symptoms_summary.strip(),
+            "",
+        ]
+
+    # ── Current Symptoms (structured, if available) ───────────────────────────
     if current_symptoms:
         lines += [
             "---",
@@ -105,21 +123,31 @@ def generate_pre_consultation_brief(
             )
         lines.append("")
 
-    # ── Risk Assessment ───────────────────────────────────────────────────────
-    lines += [
-        "---",
-        "",
-        "### Risk Assessment",
-        "",
-    ]
-    if risk_flag:
+    # ── Risk Assessment (only meaningful when triage actually happened) ────────
+    if has_symptoms:
         lines += [
-            "> **HIGH RISK DETECTED**",
-            ">",
-            f"> {escalation_reason or 'Immediate medical attention recommended.'}",
+            "---",
+            "",
+            "### Risk Assessment",
+            "",
         ]
+        if risk_flag:
+            lines += [
+                "> **HIGH RISK DETECTED**",
+                ">",
+                f"> {escalation_reason or 'Immediate medical attention recommended.'}",
+            ]
+        else:
+            lines.append("> **SAFE** — No immediate red flags detected during triage.")
     else:
-        lines.append("> **SAFE** — No immediate red flags detected during triage.")
+        lines += [
+            "---",
+            "",
+            "### Note",
+            "",
+            "> No symptoms were discussed this session — this is a history summary for the "
+            "upcoming appointment.",
+        ]
 
     # ── Footer ────────────────────────────────────────────────────────────────
     lines += [

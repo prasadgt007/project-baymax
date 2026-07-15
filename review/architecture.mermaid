@@ -1,0 +1,109 @@
+%% ============================================================================
+%% Project Baymax — Architecture Diagrams
+%% Commit reviewed: 4d9c9e6 (HEAD, branch main)
+%% Diagram A = CURRENT system (as built). Diagram B = PROPOSED (with fixes).
+%% Render each block separately (one `graph`/`flowchart` per mermaid canvas).
+%% ============================================================================
+
+%% ----------------------------------------------------------------------------
+%% DIAGRAM A — CURRENT SYSTEM (as-built)
+%% ----------------------------------------------------------------------------
+flowchart TB
+    subgraph CLIENT["React + Vite Frontend (App.jsx, single file)"]
+        UI["Login: free-text ID + role TOGGLE<br/>(no password, no token)"]
+        API["services/api.js<br/>sends patient_id + user_role as plain strings"]
+        UI --> API
+    end
+
+    subgraph FASTAPI["FastAPI (server.py) — NO AUTH"]
+        H["GET /api/health (public)"]
+        INIT["POST /api/initialize_session<br/>trusts patient_id (IDOR)"]
+        CHAT["POST /api/chat<br/>trusts patient_id + user_role"]
+        ING["POST /api/ingest<br/>403 unless role==employee (spoofable)"]
+        BRIEF["GET /api/brief/{id}<br/>role param DEFAULTS to employee -> OPEN"]
+        CACHE[["_session_cache dict<br/>(in-memory, per-process)"]]
+        THREAD["_run_in_clean_thread()<br/>Windows asyncio workaround"]
+        INIT --> CACHE
+        CHAT --> CACHE
+    end
+
+    subgraph GRAPH["LangGraph (graph.py) — MemorySaver (in-memory)"]
+        N1["baymax_agent node (nodes.py)<br/>SINGLE flat DeepAgent<br/>create_deep_agent + skills.md"]
+        N2["compliance_wrapper node<br/>appends medical disclaimer"]
+        N1 --> N2
+    end
+
+    subgraph TOOLS["7 tools bound per-patient via closure (tools.py)"]
+        T["search_patient_records | get_patient_profile<br/>get_available_slots | book_appointment<br/>get_my_appointments | cancel_appointment<br/>generate_brief_for_doctor"]
+    end
+
+    MCP["mcp_client.py<br/>spawns NEW stdio subprocess PER CALL"]
+    DBSRV["database_mcp_server.py<br/>FastMCP, 9 async tools, psycopg3"]
+    SUPA[("Supabase Postgres + pgvector<br/>connected as DB OWNER (bypasses RLS)<br/>RLS enabled, ZERO policies")]
+    LLM["NVIDIA meta/llama-3.1-70b-instruct<br/>+ nv-embedqa-e5-v5 embeddings"]
+
+    API -->|"HTTP JSON (no auth header)"| FASTAPI
+    CHAT --> THREAD --> GRAPH
+    INIT --> THREAD
+    ING --> THREAD
+    N1 --> TOOLS
+    N1 -.uses.-> LLM
+    TOOLS --> MCP --> DBSRV --> SUPA
+    DBSRV -.embeddings.-> LLM
+
+    CHAT -->|"strips doctor_brief field only;<br/>brief text still LEAKS in response"| API
+    COMP["Composio deps + env vars<br/>UNUSED (only test_composio.py)"]:::dead
+
+    classDef dead fill:#eee,stroke:#999,stroke-dasharray:5 5,color:#666;
+    classDef bad fill:#ffe0e0,stroke:#c0392b,color:#7b241c;
+    class UI,INIT,CHAT,ING,BRIEF,SUPA bad;
+
+
+%% ----------------------------------------------------------------------------
+%% DIAGRAM B — PROPOSED SYSTEM (annotated with fixes)
+%% ----------------------------------------------------------------------------
+flowchart TB
+    subgraph CLIENT2["Frontend"]
+        UI2["Supabase Auth login<br/>(email/OTP or SSO)"]
+        API2["api.js sends ONLY the JWT<br/>(no patient_id/role in body)"]
+        UI2 --> API2
+    end
+
+    subgraph EDGE["FastAPI — auth middleware"]
+        MW["Verify Supabase JWT on EVERY request<br/>derive patient_id + role from claims<br/>(app_metadata.role, sub)"]:::good
+        H2["/api/health (public)"]
+        INIT2["/api/initialize_session"]
+        CHAT2["/api/chat"]
+        ING2["/api/ingest (role=staff from JWT)"]
+        BRIEF2["/api/brief (role=staff from JWT,<br/>NO defaulted role param)"]
+        MW --> INIT2 & CHAT2 & ING2 & BRIEF2
+    end
+
+    subgraph GRAPH2["LangGraph — PostgresSaver (durable)"]
+        N1b["baymax_agent<br/>(keep single DeepAgent — it works)"]
+        GUARD["turn_count guard in state<br/>enforces <=1 triage follow-up"]:::good
+        N2b["compliance_wrapper +<br/>structured risk_flag output"]:::good
+        N1b --> GUARD --> N2b
+    end
+
+    subgraph SEC["RAG input isolation"]
+        SAN["wrap retrieved doc/notes text in<br/>clearly-delimited 'DATA, not instructions'<br/>blocks; never inline into system prompt"]:::good
+    end
+
+    subgraph TOOLS2["Tools (patient_id from JWT claim, never client)"]
+        T2["same 7 tools, brief NEVER<br/>narrated into patient response"]
+    end
+
+    POOL["MCP client with a persistent<br/>connection / pool (no per-call subprocess)"]:::good
+    DBSRV2["database_mcp_server.py"]
+    SUPA2[("Supabase Postgres + pgvector<br/>LEAST-PRIVILEGE role + FORCE RLS<br/>policies: patient_id = auth.uid() / role claim")]:::good
+    SECRETS["Secrets from vault / rotated env<br/>owner creds NOT request-adjacent"]:::good
+
+    API2 -->|"Authorization: Bearer JWT"| EDGE
+    CHAT2 --> GRAPH2
+    N1b --> TOOLS2
+    TOOLS2 --> SAN
+    TOOLS2 --> POOL --> DBSRV2 --> SUPA2
+    DBSRV2 -.- SECRETS
+
+    classDef good fill:#e3f9e5,stroke:#1e8449,color:#145a32;

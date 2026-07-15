@@ -463,15 +463,28 @@ async def book_slot(slot_id: str, patient_id: str) -> str:
                     """
                     UPDATE hospital_slots
                     SET is_booked = true, booked_patient_id = %s
-                    WHERE slot_id = %s::uuid AND is_booked = false;
+                    WHERE slot_id = %s::uuid AND is_booked = false
+                    RETURNING slot_datetime, duration_minutes, doctor_name;
                     """,
                     (patient_id, slot_id),
                 )
-                affected = cur.rowcount
+                row = await cur.fetchone()
+                if not row:
+                    return json.dumps({
+                        "success": False,
+                        "slot_id": slot_id,
+                        "patient_id": patient_id,
+                        "error": "Slot not found or already booked.",
+                    })
+                slot_dt, duration, doctor = row
                 return json.dumps({
-                    "success": affected > 0,
+                    "success": True,
                     "slot_id": slot_id,
                     "patient_id": patient_id,
+                    "slot_datetime": slot_dt.isoformat(),
+                    "duration_minutes": duration,
+                    "doctor_name": doctor,
+                    "label": slot_dt.strftime("%A, %B %d at %I:%M %p"),
                 })
     except Exception as e:
         print(f"[DB][Supabase] book_slot error: {e}", file=sys.stderr, flush=True)
@@ -552,16 +565,20 @@ async def cancel_slot(slot_id: str, patient_id: str) -> str:
                     SET is_booked = false, booked_patient_id = NULL
                     WHERE slot_id = %s::uuid
                       AND booked_patient_id = %s
-                      AND is_booked = true;
+                      AND is_booked = true
+                    RETURNING calendar_event_id;
                     """,
                     (slot_id, patient_id),
                 )
-                affected = cur.rowcount
-                if affected > 0:
+                row = await cur.fetchone()
+                if row is not None:
+                    # RETURNING gives the event_id that was on the slot so the caller
+                    # can delete the matching Google Calendar event.
                     return json.dumps({
                         "success": True,
                         "slot_id": slot_id,
                         "patient_id": patient_id,
+                        "calendar_event_id": row[0],
                     })
                 else:
                     return json.dumps({
@@ -570,6 +587,34 @@ async def cancel_slot(slot_id: str, patient_id: str) -> str:
                     })
     except Exception as e:
         print(f"[DB][Supabase] cancel_slot error: {e}", file=sys.stderr, flush=True)
+        return json.dumps({"success": False, "error": str(e)})
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Tool 10: set_slot_calendar_event
+# ────────────────────────────────────────────────────────────────────────────
+
+@mcp.tool()
+async def set_slot_calendar_event(slot_id: str, event_id: str) -> str:
+    """
+    Store the Google Calendar event_id created for a booked slot, so it can be
+    deleted later when the appointment is cancelled or rescheduled.
+    Returns JSON: {success}
+    """
+    if not _db_uri:
+        return json.dumps({"success": False, "error": "No DB connection"})
+
+    try:
+        conn = await _get_supabase_conn()
+        async with conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "UPDATE hospital_slots SET calendar_event_id = %s WHERE slot_id = %s::uuid;",
+                    (event_id, slot_id),
+                )
+                return json.dumps({"success": cur.rowcount > 0})
+    except Exception as e:
+        print(f"[DB][Supabase] set_slot_calendar_event error: {e}", file=sys.stderr, flush=True)
         return json.dumps({"success": False, "error": str(e)})
 
 

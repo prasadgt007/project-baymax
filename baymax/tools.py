@@ -16,6 +16,7 @@ Tools:
   5. generate_doctor_brief   — Create a pre-consultation brief after booking
 """
 
+import re
 from typing import Optional
 from langchain_core.tools import tool
 from .mcp_client import (
@@ -26,8 +27,45 @@ from .mcp_client import (
     book_slot_mcp,
     fetch_patient_appointments_mcp,
     cancel_slot_mcp,
+    set_slot_calendar_event_mcp,
 )
 from .briefs import generate_pre_consultation_brief
+
+_UUID_RE = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
+
+
+def _time_hint_matches(label: str, hint: str) -> bool:
+    """
+    Return True if a free-text time hint (e.g. "3pm", "the 3 PM one", "15:00",
+    "11 am") refers to the time in an appointment `label` such as
+    "Thursday, July 16 at 03:00 PM".
+
+    This lets cancellation/rescheduling work when the LLM passes a description
+    instead of a real slot UUID — we resolve it from the patient's actual bookings.
+    """
+    if not label or not hint:
+        return False
+    label_l = label.lower()
+
+    # 12-hour form: "3pm", "3 pm", "3:00 pm"
+    m = re.search(r"(\d{1,2})(?::(\d{2}))?\s*(a\.?m\.?|p\.?m\.?)", hint.lower())
+    if m:
+        hour = int(m.group(1))
+        meridiem = "pm" if m.group(3).startswith("p") else "am"
+        hour12 = 12 if hour % 12 == 0 else hour % 12
+        return f"{hour12:02d}:" in label_l and meridiem in label_l
+
+    # 24-hour form: "15:00", "15"
+    m = re.search(r"\b([01]?\d|2[0-3]):?([0-5]\d)?\b", hint)
+    if m:
+        hour = int(m.group(1))
+        meridiem = "pm" if hour >= 12 else "am"
+        hour12 = 12 if hour % 12 == 0 else hour % 12
+        return f"{hour12:02d}:" in label_l and meridiem in label_l
+
+    return False
 
 
 def create_baymax_tools(patient_id: str):
@@ -163,10 +201,55 @@ def create_baymax_tools(patient_id: str):
         """
         try:
             result = book_slot_mcp(slot_id, patient_id)
-            if result.get("success"):
-                return f"✅ Appointment booked successfully! Slot ID: {slot_id}"
-            else:
+            if not result.get("success"):
                 return f"❌ Booking failed: {result.get('error', 'Slot may already be taken.')}"
+
+            label = result.get("label", "your appointment")
+            doctor = result.get("doctor_name") or "the doctor"
+
+            # ── Best-effort: create a Google Calendar event via Composio ──────────
+            # A failure here must NOT break the booking — the slot is already
+            # reserved in the database. We only note the calendar outcome.
+            calendar_note = ""
+            try:
+                from .calendar_client import create_appointment_event
+
+                # Resolve patient name for a friendlier event title (best-effort)
+                patient_name = patient_id
+                try:
+                    profile = fetch_patient_profile_mcp(patient_id)
+                    if profile and getattr(profile, "name", None):
+                        patient_name = profile.name
+                except Exception:
+                    pass
+
+                cal = create_appointment_event(
+                    start_datetime=result.get("slot_datetime", ""),
+                    duration_minutes=result.get("duration_minutes", 60),
+                    summary=f"Doctor Appointment — {patient_name} with {doctor}",
+                    description=(
+                        f"Baymax-scheduled appointment.\n"
+                        f"Patient: {patient_name} ({patient_id})\n"
+                        f"Doctor: {doctor}\n"
+                        f"When: {label}"
+                    ),
+                )
+                if cal.get("success"):
+                    calendar_note = " It has also been added to the Google Calendar."
+                    # Persist the event_id so we can delete it on cancel/reschedule.
+                    event_id = cal.get("event_id")
+                    if event_id:
+                        try:
+                            set_slot_calendar_event_mcp(slot_id, event_id)
+                        except Exception as e:
+                            print(f"[book_appointment] Could not persist calendar event_id: {e}")
+                else:
+                    calendar_note = ""  # stay silent to the patient on calendar failure
+                    print(f"[book_appointment] Calendar event failed: {cal.get('error')}")
+            except Exception as e:
+                print(f"[book_appointment] Calendar integration error: {e}")
+
+            return f"✅ Appointment booked successfully for {label} with {doctor}.{calendar_note}"
         except Exception as e:
             return f"Error booking appointment: {e}"
 
@@ -192,31 +275,95 @@ def create_baymax_tools(patient_id: str):
             return f"Error fetching appointments: {e}"
 
     @tool
-    def cancel_appointment(slot_id: str) -> str:
+    def cancel_appointment(slot_id: str = "", appointment_time: str = "") -> str:
         """
-        Cancel an existing appointment for the current patient.
-        The slot becomes available again for other patients to book.
-        Use this when the patient wants to cancel or as the first step of rescheduling.
+        Cancel an existing appointment for the current patient. The slot becomes
+        available again for other patients. Use this to cancel, or as step 1 of a reschedule.
+
+        You can identify the appointment in any of these ways:
+          - `slot_id`: the exact UUID from get_my_appointments (most precise), OR
+          - `appointment_time`: a natural time description such as "3pm", "03:00 PM",
+            or "11 am" — the tool will match it against the patient's real bookings.
+        If the patient has only one upcoming appointment, both arguments may be empty.
 
         Args:
-            slot_id: The UUID of the appointment slot to cancel (from get_my_appointments output)
+            slot_id: The appointment slot UUID, if known.
+            appointment_time: A time/label describing which appointment to cancel.
         """
         try:
-            result = cancel_slot_mcp(slot_id, patient_id)
+            appointments = fetch_patient_appointments_mcp(patient_id)
+            if not appointments:
+                return "You have no upcoming appointments to cancel."
+
+            target = None
+
+            # 1) Exact UUID match (preferred)
+            sid = (slot_id or "").strip()
+            if _UUID_RE.match(sid):
+                target = next((a for a in appointments if a.get("slot_id") == sid), None)
+
+            # 2) Resolve from a time hint — searches BOTH provided fields, so even a
+            #    placeholder like "the slot_id of the 3pm appointment" still resolves.
+            if target is None:
+                hint = f"{appointment_time or ''} {slot_id or ''}".strip()
+                matches = [a for a in appointments if _time_hint_matches(a.get("label", ""), hint)]
+                if len(matches) == 1:
+                    target = matches[0]
+                elif len(matches) > 1:
+                    lines = ["You have more than one appointment at that time — which one?"]
+                    for i, a in enumerate(appointments, 1):
+                        lines.append(f"  {i}. {a['label']}")
+                    return "\n".join(lines)
+
+            # 3) Single-appointment fallback
+            if target is None and len(appointments) == 1:
+                target = appointments[0]
+
+            if target is None:
+                lines = ["I couldn't tell which appointment you mean. You currently have:"]
+                for i, a in enumerate(appointments, 1):
+                    lines.append(f"  {i}. {a['label']}")
+                lines.append("Which one would you like to cancel?")
+                return "\n".join(lines)
+
+            result = cancel_slot_mcp(target["slot_id"], patient_id)
             if result.get("success"):
-                return f"Appointment (Slot ID: {slot_id}) has been successfully cancelled. The slot is now available for others."
-            else:
-                return f"Could not cancel appointment: {result.get('error', 'Appointment not found or does not belong to you.')}"
+                # Best-effort: remove the matching Google Calendar event so the
+                # calendar stays in sync (important for reschedules).
+                event_id = result.get("calendar_event_id")
+                if event_id:
+                    try:
+                        from .calendar_client import delete_calendar_event
+                        cal = delete_calendar_event(event_id)
+                        if not cal.get("success"):
+                            print(f"[cancel_appointment] Calendar delete failed: {cal.get('error')}")
+                    except Exception as e:
+                        print(f"[cancel_appointment] Calendar delete error: {e}")
+                return (
+                    f"The appointment on {target['label']} has been successfully cancelled. "
+                    f"The slot is now available for others."
+                )
+            return f"Could not cancel appointment: {result.get('error', 'Appointment not found.')}"
         except Exception as e:
             return f"Error cancelling appointment: {e}"
 
     @tool
-    def generate_brief_for_doctor() -> str:
+    def generate_brief_for_doctor(symptoms_summary: str = "") -> str:
         """
         Generate a pre-consultation brief for the attending doctor.
         Call this AFTER successfully booking an appointment.
-        The brief summarises the patient's profile, current symptoms discussed,
-        and relevant medical history, including the scheduled appointment date/time.
+        The brief summarises the patient's profile and relevant medical history,
+        including the scheduled appointment date/time.
+
+        Args:
+            symptoms_summary: A short, plain-language summary of the symptoms and
+                triage details discussed with the patient THIS session (e.g.
+                "Dull headache, 5/10, both sides, 2 days, no fever"). Leave EMPTY
+                if the patient only booked an appointment without discussing symptoms —
+                in that case a lighter history-only summary is produced automatically.
+
+        NOTE: This brief is for hospital staff only. Never repeat its contents back
+        to the patient — just confirm the appointment to them.
         """
         try:
             # Fetch the patient's next appointment to include in the brief
@@ -239,6 +386,7 @@ def create_baymax_tools(patient_id: str):
                 escalation_reason="",
                 clinical_context=[],
                 appointment_datetime=appointment_label,
+                symptoms_summary=symptoms_summary or "",
             )
             return brief
         except Exception as e:

@@ -9,8 +9,14 @@ CREATE TABLE IF NOT EXISTS hospital_slots (
     slot_datetime         timestamp NOT NULL,         -- Local time (Asia/Kolkata / IST)
     duration_minutes      integer NOT NULL DEFAULT 60,
     is_booked             boolean NOT NULL DEFAULT false,
-    booked_patient_id     text REFERENCES patients(patient_id) ON DELETE SET NULL
+    booked_patient_id     text REFERENCES patients(patient_id) ON DELETE SET NULL,
+    doctor_name           text NOT NULL DEFAULT 'Dr. Amanda Ross',
+    calendar_event_id     text                        -- Google Calendar event id (set on booking, used to delete on cancel)
 );
+
+-- Ensure the extra columns exist even if the table was created by an older migration
+ALTER TABLE hospital_slots ADD COLUMN IF NOT EXISTS doctor_name text NOT NULL DEFAULT 'Dr. Amanda Ross';
+ALTER TABLE hospital_slots ADD COLUMN IF NOT EXISTS calendar_event_id text;
 
 -- 2. Indexes for fast lookups
 CREATE INDEX IF NOT EXISTS idx_hospital_slots_date

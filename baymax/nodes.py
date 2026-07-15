@@ -154,20 +154,54 @@ def baymax_agent(state: BaymaxState) -> Dict[str, Any]:
                     except Exception:
                         pass
 
-        # Check if a brief was generated
+        # Check if a brief was generated (staff-only "Pre-Consultation Brief" or
+        # the lighter booking-only "Patient Summary"). Captured for the doctor_brief
+        # field; it must NOT appear in the patient-facing response.
         for msg in output_messages:
             if hasattr(msg, "content") and isinstance(msg.content, str):
-                if "Pre-Consultation Brief" in msg.content:
+                if "For Authorised Medical Staff Only" in msg.content or (
+                    "## Pre-Consultation Brief" in msg.content
+                    or "## Patient Summary" in msg.content
+                ):
                     brief = msg.content
 
-        # Clean the final text so the user doesn't see raw slot_ids
+        # Clean the final text so the patient never sees raw slot IDs / UUIDs.
+        # (Safety net — the system prompt already instructs the agent not to
+        #  reveal IDs, but models occasionally slip.)
         import re
-        # Remove lines that are just slot_id
+        _UUID = r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+        # Lines that are just a slot_id
         final_text = re.sub(r"\n\s*slot_id:\s*[\w-]+", "", final_text)
-        # Remove inline slot_ids
-        final_text = re.sub(r"\(?slot_id:\s*[\w-]+\)?", "", final_text)
+        # "Slot ID: <uuid>" / "(ID: <uuid>)" / "slot_id: <uuid>" (inline)
+        final_text = re.sub(rf"\(?\s*(?:slot[_ ]?id|ID)\s*:\s*{_UUID}\s*\)?", "", final_text, flags=re.IGNORECASE)
+        # Any bare UUID left over
+        final_text = re.sub(_UUID, "", final_text)
+        # The literal word "slot_id" mentioned in prose to the patient
+        final_text = re.sub(r"\bslot[_ ]?id\b", "time slot", final_text, flags=re.IGNORECASE)
+
+        # Strip any doctor brief / patient summary block that the agent narrated —
+        # it is staff-only and must never be shown in the patient-facing chat.
+        # The block runs from its heading to the staff-only footer.
+        final_text = re.sub(
+            r"#{1,3}\s*(?:Pre-Consultation Brief|Patient Summary).*?For Authorised Medical Staff Only\*?",
+            "",
+            final_text,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        # If the agent introduced the brief with a lead-in like
+        # "Here is a pre-consultation brief for the doctor:", drop that dangling line.
+        final_text = re.sub(
+            r"(?im)^.*(?:pre-consultation brief|brief for the doctor|patient summary)\s*:?\s*$",
+            "",
+            final_text,
+        )
+        # Tidy leftovers: empty parens, doubled spaces, excess blank lines
         final_text = re.sub(r"\(\s*\)", "", final_text)
-        final_text = final_text.replace("  ", " ").strip()
+        final_text = re.sub(r"[ \t]{2,}", " ", final_text)
+        final_text = re.sub(r"\n{3,}", "\n\n", final_text)
+        final_text = final_text.strip()
+        if not final_text:
+            final_text = "✅ Your appointment has been booked. Is there anything else I can help you with?"
 
         return {
             "messages": [HumanMessage(content=user_input), AIMessage(content=final_text)],

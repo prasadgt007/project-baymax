@@ -238,3 +238,22 @@ def cancel_slot_mcp(slot_id: str, patient_id: str) -> dict:
                 return {"success": False}
 
     return asyncio.run(_cancel())
+
+
+# ── Tool 10: set_slot_calendar_event ──────────────────────────────────────────
+
+def set_slot_calendar_event_mcp(slot_id: str, event_id: str) -> dict:
+    """Persist the Google Calendar event_id for a booked slot. Returns {success}."""
+    async def _set():
+        async with stdio_client(_make_server_params()) as (read, write):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                result = await session.call_tool(
+                    "set_slot_calendar_event",
+                    arguments={"slot_id": slot_id, "event_id": event_id},
+                )
+                if result.content and len(result.content) > 0:
+                    return json.loads(result.content[0].text)
+                return {"success": False}
+
+    return asyncio.run(_set())

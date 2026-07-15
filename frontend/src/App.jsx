@@ -302,12 +302,17 @@ export default function App() {
   }
 
   // ── Chat (Patient) ────────────────────────────────────────────────────────
-  const handleSend = useCallback(async (text) => {
+  const handleSend = useCallback(async (text, displayText) => {
     const msg = text || inputText
     if (!msg.trim() || isTyping) return
 
+    // What the patient sees in their bubble may differ from what we send to the
+    // backend (e.g. slot bookings carry a hidden `<!-- slot_id: ... -->` marker
+    // that must never be shown). Fall back to a stripped version of the message.
+    const shown = (displayText || msg).replace(/<!--[\s\S]*?-->/g, '').trim()
+
     setInputText('')
-    setMessages((prev) => [...prev, { id: `u-${Date.now()}`, role: 'user', content: msg }])
+    setMessages((prev) => [...prev, { id: `u-${Date.now()}`, role: 'user', content: shown }])
     setIsTyping(true)
     setAvailableSlots([])
 
@@ -332,7 +337,11 @@ export default function App() {
 
   const handleSlotSelect = useCallback(async (slot) => {
     setAvailableSlots([])
-    handleSend(`Book the ${slot.label} slot <!-- slot_id: ${slot.slot_id} -->`)
+    // Send the slot_id to the backend in a hidden marker, but show the patient a clean label.
+    handleSend(
+      `Book the ${slot.label} slot <!-- slot_id: ${slot.slot_id} -->`,
+      `Book the ${slot.label} slot`,
+    )
   }, [handleSend])
 
   const handleChatKeyDown = (e) => {
