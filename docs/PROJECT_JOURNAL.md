@@ -92,6 +92,29 @@ design question (see "Open questions" below).
 - **Files:** ...
 -->
 
+### 2026-07-17 — Repo cleanup, file organization, docs, full test pass
+- **What:**
+  - **Removed cruft:** `transcript_matches.txt` + `write_nodes.txt` (old testing/junk),
+    `test_composio.py` (leftover probe), `baymax/utils.py` (dead, unimported), and
+    `docs/workflow.md` + `docs/workflow.mmd` (stale multi-agent diagrams contradicting the current
+    single-DeepAgent design).
+  - **Organized:** added `scripts/`; moved `setup_hospital_slots.py` there; added
+    `scripts/check_composio.py` (read-only Composio/Calendar preflight — fills the gap the `.env`
+    comment referenced) and `scripts/reset_demo.py` (un-book slots + delete Baymax calendar events
+    for a clean demo run).
+  - **Docs:** wrote the previously-empty `README.md` (clone-and-run guide for the workshop),
+    `docs/CODEBASE_GUIDE.md` (beginner walkthrough following one message end-to-end), and
+    `docs/RECOMMENDATIONS.md` (skills/subagents/scripts suggestions + workshop notes + test results).
+  - **Fixed** a Windows console crash (emoji) in `check_composio.py`; corrected a stale script path
+    comment in `.env`.
+- **Test pass (live app):** greeting, triage follow-up, clean slot list, booking→Supabase+Google
+  Calendar, cancel→calendar sync, patient-upload 403 / staff 200, adaptive staff brief — **all
+  pass**. No new functional bugs. Cleaned up all test bookings/docs afterward.
+- **Key workshop risk surfaced:** **latency** — a booking turn can take 2–3 min (multiple sequential
+  model calls + RAG every turn + per-call MCP subprocess). Mitigations in `docs/RECOMMENDATIONS.md`.
+- **Files:** removed 5; added `scripts/{check_composio,reset_demo}.py`, `README.md`,
+  `docs/CODEBASE_GUIDE.md`, `docs/RECOMMENDATIONS.md`; moved `setup_hospital_slots.py`.
+
 ### 2026-07-16 — Added `workshop/` prep materials
 - **What:** created a `workshop/` folder with presenter-facing docs: `README.md` (index),
   `architecture-single-deepagent-vs-multi-agent.md` (why we moved off the multi-agent design —
