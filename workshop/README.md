@@ -14,6 +14,10 @@ DeepAgents**, plus **Agent Skills**, developed in a systematic, efficient way.
 2. **[rag-supabase-pgvector-and-auth.md](rag-supabase-pgvector-and-auth.md)**
    — How Retrieval-Augmented Generation works in Baymax using Supabase + pgvector, the data model
    and query flow, and how Supabase unlocks the next features (Auth, Row-Level Security, Storage).
+3. **[slide-content.md](slide-content.md)**
+   — Exhaustive slide-source material for the workshop PPT: tech stack, an end-to-end architecture
+   flowchart, the full evolution timeline (multi-agent → single DeepAgent → bug fixes → cleanup),
+   security review highlights, and speaker-note gotchas.
 
 ## How these map to the demo
 - **LangGraph** — the 2-node graph (`agent → compliance`) is the smallest honest example of a

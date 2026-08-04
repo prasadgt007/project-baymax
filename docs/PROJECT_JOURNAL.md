@@ -92,6 +92,54 @@ design question (see "Open questions" below).
 - **Files:** ...
 -->
 
+### 2026-08-04 — Frontend visual pass for the workshop (blob + projector legibility)
+- **What:**
+  - **Blob glow/reflection (the original ask):** wired up `@react-three/postprocessing`
+    (`<EffectComposer>` + `<Bloom>`) — it was an installed-but-unused dependency, so nothing in the
+    scene ever bloomed. Moved `emissive` onto the *visible* surfaces (outer haze + main body)
+    instead of only the buried inner core; added a drei `<Environment>` built from two
+    `<Lightformer>` panels so the main body's existing `metalness`/`envMapIntensity` finally has
+    something to reflect (previously dead props); added a pulsing red rim/back light so the
+    silhouette reads against the `#09060d` backdrop. Reduced distortion (0.45 → 0.32) — high
+    distort reads as a lumpy splat once the blob is large on screen.
+  - **Projector legibility (biggest workshop win):** at 1920×1080 the chat panel was only 512px
+    wide (27% of screen) with 14px body text — unreadable from the back of a room. Added `xl:`/`2xl:`
+    breakpoints: panel now 896px (47%) and text 18px. Laptop/mobile unchanged.
+  - **Quick-start suggestion chips:** the fresh-chat screen had ~50% dead space under the greeting.
+    Added three chips matching the demo script in `docs/RECOMMENDATIONS.md` — they fill the space
+    and double as an on-screen cue card during the talk.
+  - **Mobile:** bloom bled through the glass chat panel and washed out message text; bloom intensity
+    and blob scale now step down below 768px via a `useIsNarrow` media-query hook.
+  - **Perf hygiene** (per `.agents/skills/r3f-3d-experience/SKILL.md`): capped `dpr={[1, 2]}` (was
+    uncapped) and dropped the main sphere from 128×128 to 64×64 segments.
+- **Why:** owner is presenting this as a workshop demo and wanted the 3D background to look its
+  best; the blob was rendering as a barely-visible red haze. Investigating that surfaced the more
+  important projector-legibility problem.
+- **Also found (and fixed by owner):** the Supabase project had **auto-hibernated** — the pooler
+  returned `tenant/user ... not found` and the project's DNS stopped resolving. The app degrades
+  *silently* (HTTP 200 + a generic "I couldn't find your profile" greeting), so it looks healthy
+  while every DB-backed demo step is dead. Owner resumed the project; verified end-to-end
+  afterwards. **Worth re-checking before any future demo — free-tier projects pause when idle.**
+- **Verified live:** greeting returns the real record (Chester V, Hypertension/Asthma), suggestion
+  chip → full agent turn → proper triage follow-up with remedies correctly withheld, `POST /api/chat`
+  200, no console errors, `npm run build` passes. Booking-turn latency remains ~2–3 min (known).
+- **Files:** `frontend/src/App.jsx`.
+
+### 2026-08-04 — Consolidated workshop PPT source material
+- **What:** wrote `workshop/slide-content.md` — a single, exhaustive document consolidating the
+  tech stack (with what each piece is used for), an end-to-end architecture flowchart (Mermaid),
+  the 7-tool table, the full evolution timeline (multi-agent → single DeepAgent migration → bug-fix
+  cluster → repo cleanup) with the reasoning behind each pivot, key architectural trade-offs,
+  `review/REPORT.md`'s security findings + remediation roadmap, and a speaker-notes appendix
+  (gotchas, demo script, file map). Pulled from `docs/PROJECT_JOURNAL.md`, `review/*`,
+  `workshop/*.md`, `README.md`, `docs/CODEBASE_GUIDE.md`, `docs/RECOMMENDATIONS.md`, and the code
+  itself (cross-checked for accuracy, e.g. the actual model is `meta/llama-3.1-70b-instruct`, not
+  the "3.3" some docstrings claim).
+- **Why:** owner is building a workshop PPT and wanted one source-of-truth document instead of
+  hunting across scattered docs; also updated the tagline framing from the original "Multi-Agent AI
+  Systems" pitch to reflect the current single-DeepAgent, Agent-Skills-driven, agentic design.
+- **Files:** `workshop/slide-content.md` (new); `workshop/README.md` (added to Contents index).
+
 ### 2026-07-17 — Repo cleanup, file organization, docs, full test pass
 - **What:**
   - **Removed cruft:** `transcript_matches.txt` + `write_nodes.txt` (old testing/junk),

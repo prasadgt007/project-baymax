@@ -1,6 +1,7 @@
-import { useState, useRef, useEffect, useCallback } from 'react'
+import { useState, useRef, useEffect, useCallback, Suspense } from 'react'
 import { Canvas, useFrame } from '@react-three/fiber'
-import { MeshDistortMaterial } from '@react-three/drei'
+import { MeshDistortMaterial, Environment, Lightformer } from '@react-three/drei'
+import { EffectComposer, Bloom } from '@react-three/postprocessing'
 import { motion, AnimatePresence } from 'framer-motion'
 import ReactMarkdown from 'react-markdown'
 import * as THREE from 'three'
@@ -40,11 +41,30 @@ const DOC_TYPES = [
   { value: 'prescription', label: 'Prescription' },
 ]
 
+// ─── Viewport helper ──────────────────────────────────────────────────────────
+// One-time media-query read + change listener (never per-frame — see the
+// r3f-3d-experience skill's golden rule #1). Used to scale the 3D scene down on
+// narrow screens, where the blob would otherwise wash out the chat text.
+function useIsNarrow(maxWidth = 768) {
+  const [isNarrow, setIsNarrow] = useState(
+    () => typeof window !== 'undefined' && window.innerWidth <= maxWidth
+  )
+  useEffect(() => {
+    const mq = window.matchMedia(`(max-width: ${maxWidth}px)`)
+    const onChange = (e) => setIsNarrow(e.matches)
+    setIsNarrow(mq.matches)
+    mq.addEventListener('change', onChange)
+    return () => mq.removeEventListener('change', onChange)
+  }, [maxWidth])
+  return isNarrow
+}
+
 // ─── Three.js: Blob ───────────────────────────────────────────────────────────
-function HeroBlob({ mouse }) {
+function HeroBlob({ mouse, isNarrow }) {
   const meshRef = useRef()
   const lightRef1 = useRef()
   const lightRef2 = useRef()
+  const rimLightRef = useRef()
 
   useFrame((state) => {
     const t = state.clock.elapsedTime
@@ -68,45 +88,89 @@ function HeroBlob({ mouse }) {
       lightRef2.current.position.y = Math.sin(t * 0.28) * 4
       lightRef2.current.position.z = Math.sin(t * 0.45) * 3 + 2
     }
+    if (rimLightRef.current) {
+      // gentle pulse, synced with the same phase as the body's "breathing" scale
+      rimLightRef.current.intensity = 3.2 + Math.sin(t * 0.5) * 0.8
+    }
   })
 
   return (
     <>
-      <ambientLight intensity={0.15} />
+      <ambientLight intensity={0.22} />
       <pointLight ref={lightRef1} color="#be185d" intensity={3.5} distance={12} />
       <pointLight ref={lightRef2} color="#9f1239" intensity={2.8} distance={14} />
       <pointLight position={[0, 0, 6]} color="#fda4af" intensity={1.2} distance={10} />
+      {/* Rim/back light — lights the far side of the sphere so its edge glows against the
+          near-black page backdrop instead of disappearing into it */}
+      <pointLight ref={rimLightRef} position={[-1.5, 0.5, -6]} color="#ff1744" intensity={5} distance={16} />
 
-      {/* Outer haze */}
-      <mesh>
-        <sphereGeometry args={[2.55, 64, 64]} />
-        <MeshDistortMaterial color="#7a0828" transparent opacity={0.08} distort={0.55} speed={1.8} roughness={0} />
-      </mesh>
+      {/* Cheap procedural environment (baked once from in-scene light panels, no external HDRI
+          fetch) purely so the main body's metalness/envMapIntensity has red light to reflect
+          instead of doing nothing */}
+      <Suspense fallback={null}>
+        <Environment resolution={64} frames={1} background={false}>
+          <Lightformer intensity={4} color="#ff2d55" position={[4, 2, 3]} scale={[6, 6, 1]} />
+          <Lightformer intensity={2.5} color="#be185d" position={[-4, -1, 2]} scale={[5, 5, 1]} />
+        </Environment>
+      </Suspense>
 
-      {/* Main body */}
-      <mesh ref={meshRef}>
-        <sphereGeometry args={[2.2, 128, 128]} />
-        <MeshDistortMaterial color="#9f1239" transparent opacity={0.92} distort={0.45} speed={2.2} roughness={0.05} metalness={0.1} envMapIntensity={1} />
-      </mesh>
+      {/* Scaled down on narrow screens so the blob frames the UI instead of swamping it.
+          Distortion is kept moderate — high distort reads as a lumpy splat once the blob
+          is large on screen, rather than an orb. */}
+      <group scale={isNarrow ? 0.68 : 1}>
+        {/* Outer haze — soft emissive so it feeds the bloom halo instead of being inert */}
+        <mesh>
+          <sphereGeometry args={[2.55, 48, 48]} />
+          <MeshDistortMaterial
+            color="#7a0828" transparent opacity={0.1} distort={0.42} speed={1.8} roughness={0}
+            emissive="#7a0828" emissiveIntensity={0.22} toneMapped={false}
+          />
+        </mesh>
 
-      {/* Inner glowing core */}
-      <mesh>
-        <sphereGeometry args={[1.3, 64, 64]} />
-        <MeshDistortMaterial color="#e11d48" transparent opacity={0.35} distort={0.3} speed={3} roughness={0} emissive="#be185d" emissiveIntensity={0.6} />
-      </mesh>
+        {/* Main body — the surface you actually see now glows and reflects, not just the buried core */}
+        <mesh ref={meshRef}>
+          <sphereGeometry args={[2.2, 64, 64]} />
+          <MeshDistortMaterial
+            color="#9f1239" transparent opacity={0.92} distort={0.32} speed={2.2}
+            roughness={0.05} metalness={0.35} envMapIntensity={1.2}
+            emissive="#e11d48" emissiveIntensity={0.3} toneMapped={false}
+          />
+        </mesh>
+
+        {/* Inner glowing core */}
+        <mesh>
+          <sphereGeometry args={[1.3, 48, 48]} />
+          <MeshDistortMaterial
+            color="#e11d48" transparent opacity={0.4} distort={0.26} speed={3} roughness={0}
+            emissive="#ff375f" emissiveIntensity={1.1} toneMapped={false}
+          />
+        </mesh>
+      </group>
     </>
   )
 }
 
 function Scene({ mouse }) {
+  const isNarrow = useIsNarrow()
   return (
     <Canvas
       className="absolute inset-0"
       camera={{ position: [0, 0, 7], fov: 50 }}
+      dpr={[1, 2]}
       gl={{ antialias: true, toneMapping: THREE.ACESFilmicToneMapping, toneMappingExposure: 1.2 }}
       style={{ position: 'absolute', inset: 0 }}
     >
-      <HeroBlob mouse={mouse} />
+      <HeroBlob mouse={mouse} isNarrow={isNarrow} />
+      {/* Bloom is dialled back on narrow screens — the glass chat panel covers most of a
+          phone viewport, so full-strength glow bleeds through it and hurts text contrast. */}
+      <EffectComposer disableNormalPass>
+        <Bloom
+          intensity={isNarrow ? 0.3 : 0.55}
+          luminanceThreshold={isNarrow ? 0.3 : 0.22}
+          luminanceSmoothing={0.9}
+          mipmapBlur
+        />
+      </EffectComposer>
     </Canvas>
   )
 }
@@ -146,7 +210,7 @@ function ChatBubble({ msg }) {
         </div>
       )}
       <div
-        className={`px-4 py-3 text-sm leading-relaxed max-w-[80%] ${isUser ? 'rounded-2xl rounded-tr-sm' : 'rounded-2xl rounded-tl-sm'}`}
+        className={`px-4 py-3 xl:px-5 xl:py-3.5 text-sm xl:text-base 2xl:text-lg leading-relaxed max-w-[80%] ${isUser ? 'rounded-2xl rounded-tr-sm' : 'rounded-2xl rounded-tl-sm'}`}
         style={isUser
           ? { background: 'linear-gradient(135deg, #9f1239, #be185d)', color: 'white', boxShadow: '0 4px 16px rgba(159,18,57,0.35)' }
           : { ...GLASS_DARK, color: 'rgba(255,255,255,0.88)' }
@@ -191,6 +255,44 @@ function SlotChip({ slot, onSelect }) {
       <Clock size={11} className="text-rose-400" />
       {slot.label}
     </motion.button>
+  )
+}
+
+// ─── Quick-start suggestions ──────────────────────────────────────────────────
+// Shown only while the conversation is still just the greeting. Fills the empty
+// space under it, and doubles as an on-screen cue card for the demo script in
+// docs/RECOMMENDATIONS.md (symptom → records → booking).
+const QUICK_STARTS = [
+  "I've had a headache for two days",
+  'What did my last blood test say?',
+  'Book an appointment',
+]
+
+function SuggestionChips({ onPick, disabled }) {
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: 8 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ delay: 0.35, type: 'spring', stiffness: 260, damping: 28 }}
+      className="pl-8 pt-2"
+    >
+      <p className="text-white/30 text-[9px] xl:text-[10px] uppercase tracking-widest mb-2">Try asking</p>
+      <div className="flex flex-wrap gap-2">
+        {QUICK_STARTS.map((text) => (
+          <motion.button
+            key={text}
+            whileHover={{ scale: 1.04, boxShadow: '0 4px 20px rgba(159,18,57,0.45)' }}
+            whileTap={{ scale: 0.96 }}
+            onClick={() => onPick(text)}
+            disabled={disabled}
+            className="px-3.5 py-2 text-xs xl:text-sm text-white/85 rounded-full cursor-pointer transition-colors disabled:opacity-40"
+            style={{ background: 'rgba(159,18,57,0.18)', border: '1px solid rgba(190,24,93,0.45)' }}
+          >
+            {text}
+          </motion.button>
+        ))}
+      </div>
+    </motion.div>
   )
 }
 
@@ -558,8 +660,8 @@ export default function App() {
               initial={{ opacity: 0, y: 20, scale: 0.96 }}
               animate={{ opacity: 1, y: 0, scale: 1 }}
               transition={{ type: 'spring', stiffness: 260, damping: 28 }}
-              className="flex flex-col w-full max-w-lg"
-              style={{ ...GLASS, height: 'min(88vh, 680px)' }}
+              className="flex flex-col w-full max-w-lg xl:max-w-3xl 2xl:max-w-4xl"
+              style={{ ...GLASS, height: 'min(88vh, 880px)' }}
             >
               {/* Header */}
               <div className="flex items-center justify-between px-4 py-3 shrink-0" style={{ borderBottom: '1px solid rgba(255,255,255,0.07)' }}>
@@ -592,6 +694,9 @@ export default function App() {
                 {messages.map((msg) => (
                   <ChatBubble key={msg.id} msg={msg} />
                 ))}
+                {messages.length === 1 && !isTyping && (
+                  <SuggestionChips onPick={(t) => handleSend(t)} disabled={isTyping} />
+                )}
                 {isTyping && <TypingIndicator />}
                 <div ref={messagesEndRef} />
               </div>
@@ -627,7 +732,7 @@ export default function App() {
                     onChange={(e) => setInputText(e.target.value)}
                     onKeyDown={handleChatKeyDown}
                     placeholder="Describe your symptoms…"
-                    className="flex-1 resize-none text-sm text-white placeholder-white/20 outline-none leading-relaxed py-2.5 px-3 rounded-xl transition-all"
+                    className="flex-1 resize-none text-sm xl:text-base 2xl:text-lg text-white placeholder-white/20 outline-none leading-relaxed py-2.5 px-3 rounded-xl transition-all"
                     style={{ background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.1)', minHeight: '42px', maxHeight: '120px', scrollbarWidth: 'none' }}
                     onInput={(e) => { e.target.style.height = 'auto'; e.target.style.height = e.target.scrollHeight + 'px' }}
                     disabled={isTyping}
