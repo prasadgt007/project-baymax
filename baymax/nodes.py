@@ -13,6 +13,7 @@ There are only two nodes:
 """
 
 import os
+import re
 from typing import Dict, Any
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 from langchain_nvidia_ai_endpoints import ChatNVIDIA
@@ -308,14 +309,24 @@ def compliance_wrapper(state: BaymaxState) -> Dict[str, Any]:
         "before starting any treatment.*"
     )
 
+    # Never attach the disclaimer to the canned Out-of-Scope decline (skills.md) — its
+    # own wording ("symptom analysis") would otherwise false-positive against
+    # medical_indicators below, even though it isn't health guidance.
+    is_out_of_scope_decline = "not able to assist with requests outside those areas" in response.lower()
+
     # Only append disclaimer to responses that contain medical content
     # (skip for greetings, out-of-scope declines, booking confirmations, etc.)
+    # Word-boundary matched so e.g. "rest" doesn't false-positive on "interested"/"restore".
     medical_indicators = [
         "remedy", "treatment", "medication", "symptom", "consult a doctor",
         "condition", "recommend", "⚠️", "OTC", "over-the-counter",
         "ibuprofen", "acetaminophen", "rest", "hydrat",
     ]
-    contains_medical = any(indicator in response.lower() for indicator in medical_indicators)
+    response_lower = response.lower()
+    contains_medical = not is_out_of_scope_decline and any(
+        re.search(rf"\b{re.escape(indicator.lower())}", response_lower)
+        for indicator in medical_indicators
+    )
 
     if contains_medical and disclaimer.strip() not in response:
         response = response + disclaimer
