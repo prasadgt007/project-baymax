@@ -1,215 +1,176 @@
-# 🏥 Project Baymax — AI Healthcare Companion
+# Project Baymax — Agentic AI Healthcare Assistant
 
-Ask a patient what it's like to see a doctor and you'll hear some version of the same story: weeks
-of waiting for an appointment, a rushed few minutes once they're finally in the room, and having to
-re-explain their whole history because no one's had time to read the chart. Ask the doctor, and
-you'll hear the mirror image — too little time with each patient, and too many hours afterward
-typing notes into an EHR that never seems to give any of that time back.
+An AI assistant that gives patients symptom triage, answers from their own medical records, and
+appointment booking in one chat, and gives doctors a pre-visit brief before the patient walks in.
 
-None of that is anecdotal — it's measured, and it's large:
-
-## The problem, in numbers
-- **More than 12 million** Americans (1 in 20 adults) experience a diagnostic error every year in
-  outpatient care alone — [Singh, Meyer & Thomas, *BMJ Quality & Safety*, 2014](https://pubmed.ncbi.nlm.nih.gov/24742777/) —
-  and a 2023 Johns Hopkins–led study estimates **795,000 people a year** are permanently disabled or
-  die as a result of misdiagnosis — [Newman-Toker et al., *BMJ Quality & Safety*, 2023](https://pubmed.ncbi.nlm.nih.gov/37460118/).
-- **31 days** — the average wait for a new physician appointment across major U.S. cities in 2025,
-  up **48% since 2004** — [AMN Healthcare, 2025 Survey of Physician Appointment Wait Times](https://www.amnhealthcare.com/amn-insights/physician/whitepapers/2025-survey-of-physician-appointment-wait-times/).
-- For every **1 hour** a physician spends face-to-face with patients, nearly **2 more hours** go to
-  EHR work and paperwork — [Annals of Internal Medicine, via the American Medical Association](https://pnhp.org/news/physicians-spend-two-hours-on-ehrs-and-desk-work-for-every-hour-of-direct-patient-care/).
-- And the face time itself keeps shrinking: primary care visits last **under 5 minutes** for half
-  the world's population — [*BMJ Open*, a 67-country study of 28.5M consultations](https://www.sciencedaily.com/releases/2017/11/171108215721.htm).
-- **$150 billion** is lost every year in the U.S. alone to missed appointments, with no-show rates
-  running **5–30%** depending on specialty — [HCI Innovation Group](https://www.hcinnovationgroup.com/clinical-it/article/13008175/missed-appointments-cost-the-us-healthcare-system-150b-each-year).
-- **46%** of patients have filled out the *same* medical history form more than once, and **97%**
-  say it matters that their provider actually has their full history on hand — [Harmony Healthcare IT](https://www.harmonyhit.com/electronic-medical-records-statistics/).
-
-The encouraging part: this is already provably tractable with exactly this kind of technology —
-where AI-assisted documentation has been adopted, it's cut physician admin time by roughly **20%**,
-and **75%** of physician AI users say it's already reduced their burden — [Doximity, 2026 State of
-AI in Medicine Report](https://www.doximity.com/reports/state-of-ai-medicine-report/2026).
-
-## How Baymax helps
-Baymax is a small, workshop-scale demonstration of an agentic AI assistant aimed squarely at that
-gap — **personalized enough to feel like it actually knows the patient**, and **useful enough to
-give hospital staff a head start before the patient ever walks in**.
-
-**For patients**, that means: not re-explaining a chronic condition on every visit, because Baymax
-already knows it and opens by referencing it directly, by name; getting an answer to "what did my
-last blood test say?" in seconds via semantic search over their *own* records, instead of waiting
-weeks for a callback; being asked real follow-up questions about a new symptom — severity, duration,
-what makes it worse — the way a careful clinician would, before any remedy is suggested, and with
-that remedy checked against the patient's own allergies and medications; and booking, rescheduling,
-or cancelling an appointment (synced straight to Google Calendar) from a chat message instead of a
-phone queue.
-
-**For hospital staff**, that means an auto-generated pre-consultation brief waiting for the doctor
-before the patient sits down — symptoms, relevant history, allergies, current medications, already
-synthesized into one page. That directly targets the same root cause research ties to a meaningful
-share of diagnostic error and rushed visits: not enough time, not enough information, right when it
-matters most.
-
-None of this replaces clinical judgment, and Baymax doesn't claim to. It's a demo built to showcase
-**LangChain · LangGraph · LangSmith · DeepAgents**, with **Supabase (Postgres + pgvector)** for data
-& vector search and **Composio** for Google Calendar, as one concrete way these patterns can be
-pointed at a real, well-documented problem.
-
-> ⚠️ **Demo project.** There is **no authentication yet** — the client sends a `patient_id` and a
-> `role`. Do not use with real patient data. See [review/REPORT.md](review/REPORT.md) for the full
-> security assessment and roadmap.
+- **Personal project**, designed and built solo. This repo is the 2026 rebuild.
+- **Built with:** LangGraph · DeepAgents · MCP · Supabase (Postgres + pgvector) · LangSmith · FastAPI · React
+- **Recognition:** the original version won the **Bold Leap Award** at Accelirate's Agentic Hackathon (2025).
+  The rebuild was the main case study for a 3-country workshop series on building and tracing AI agents.
 
 ---
+
+## The problem
+
+Patients wait weeks for an appointment, then get a short visit where they re-explain their history.
+Doctors spend close to
+[two hours on EHR and desk work for every hour with patients](https://pnhp.org/news/physicians-spend-two-hours-on-ehrs-and-desk-work-for-every-hour-of-direct-patient-care/),
+so the context that would speed up the visit is rarely read beforehand. The average wait for a new
+physician appointment across major US cities was
+[31 days in 2025](https://www.amnhealthcare.com/amn-insights/physician/whitepapers/2025-survey-of-physician-appointment-wait-times/).
+
+Baymax targets both sides: patients get answers and bookings without a phone queue, and staff get a
+one-page brief built from the patient's records.
 
 ## What it does
-- **Proactive greeting** — on login, greets the patient by name and references their chronic
-  conditions / upcoming appointment.
-- **Symptom triage** — asks 1–2 follow-up questions *before* suggesting safe home remedies.
-- **Records Q&A (RAG)** — semantic search over the patient's documents and visit notes.
-- **Scheduling** — shows open slots, books/cancels/reschedules, and syncs to **Google Calendar**.
-- **Staff view** — upload documents and view an auto-generated pre-consultation brief (hidden from
-  patients).
+
+| For patients | For hospital staff |
+|---|---|
+| Greets the patient by name and references their chronic conditions | Uploads documents (PDFs) to a patient's record |
+| Triages symptoms: asks follow-up questions **before** suggesting remedies, then checks remedies against the patient's allergies, medications, and chronic conditions | Gets an auto-generated pre-consultation brief (symptoms, history, allergies, medications), hidden from the patient view |
+| Answers questions about their own records using RAG ("What did my last blood test say?") | Role-based access: patients cannot upload or view briefs |
+| Books, cancels, and reschedules appointments, synced to Google Calendar | |
 
 ---
 
-## Architecture at a glance
+## Architecture
+
 ```
 React + Vite + Three.js (frontend, :3000)
-        │  /api  (Vite proxy)
+        │  /api
         ▼
 FastAPI (server.py, :8000)
         ▼
 LangGraph:  baymax_agent  ──▶  compliance_wrapper  ──▶  reply
-            (one DeepAgent,       (adds medical
-             ReAct + 7 tools)      disclaimer)
+            (one DeepAgent,       (deterministic node,
+             ReAct loop, 7 tools)  adds medical disclaimer)
         ▼
 MCP stdio server (database_mcp_server.py)
         ▼
 Supabase Postgres + pgvector      Composio ─▶ Google Calendar
 ```
-Deeper explanation in [docs/CODEBASE_GUIDE.md](docs/CODEBASE_GUIDE.md) and
-[workshop/](workshop/).
+
+### Key design decision: one DeepAgent instead of a supervisor with sub-agents
+
+The first version used a supervisor that routed each message to a Symptom, History, or Scheduling
+agent. It failed in three ways:
+
+1. **Misrouting.** "My head hurts, and did my last blood test show anything?" is both a symptom and
+   a records query. The supervisor had to pick one, and often picked wrong.
+2. **Latency.** Each hop was a sequential LLM call, so one turn could take 4–6 calls before the user
+   saw a reply.
+3. **Trivial steps as agents.** The disclaimer and the scope check were full LLM agents doing
+   deterministic work.
+
+I replaced it with a single DeepAgent running one ReAct loop over 7 tools. The disclaimer became a
+plain code node and the scope check became a prompt rule. Mixed-intent messages are handled in one
+context, and there is no routing step to get wrong. Full write-up:
+[docs/architecture-decision.md](docs/architecture-decision.md).
+
+### Other implementation details
+
+- **Patient isolation by closure.** Tools are created per session and bound to the current
+  `patient_id`, so the model never passes a patient ID and cannot query another patient.
+- **All database access goes through an MCP server**, which keeps SQL and vector search out of the
+  agent code.
+- **LangSmith tracing** to check tool calls, latency, and token use for each turn.
 
 ---
 
-## Prerequisites
-- **Python ≥ 3.12** and **[uv](https://docs.astral.sh/uv/)** (package manager)
-- **Node.js ≥ 18** and **npm**
-- A **Supabase** project (Postgres with the `vector` extension)
-- An **NVIDIA API key** (for the LLM + embeddings — [build.nvidia.com](https://build.nvidia.com))
-- *(Optional)* A **Composio** account with Google Calendar connected (for calendar sync)
+## Testing
+
+Seven flows tested end to end against the live database and calendar:
+
+| # | Flow | Result |
+|---|---|---|
+| 1 | Greeting with name and chronic conditions | Pass |
+| 2 | Triage asks a follow-up before suggesting remedies | Pass |
+| 3 | Slot list shows plain times, no internal IDs | Pass |
+| 4 | Booking writes to Supabase and creates a Google Calendar event | Pass |
+| 5 | Cancellation frees the slot and deletes the calendar event | Pass |
+| 6 | Patient upload blocked (403), staff upload allowed (200) | Pass |
+| 7 | Staff brief adapts when no symptoms are on file | Pass |
+
+## Known limitations
+
+This is a demo built on synthetic patient data. Before any real use, it would need:
+
+- **Authentication.** The client currently sends `patient_id` and `role`, and the server trusts them.
+  The planned fix is Supabase Auth (JWT) with row-level security policies.
+- **Code-level safety checks.** The triage follow-up and the remedy checks (allergies, medications,
+  chronic conditions) are enforced by the system prompt, not by code, so the model can still skip
+  them. They should move into graph state and code gates.
+- **Lower latency.** RAG runs on every message (a deliberate choice for the workshop demo) and each
+  MCP call starts a new subprocess.
 
 ---
 
-## Setup
+## Run locally
 
-### 1. Clone & install
+**Prerequisites:** Python ≥ 3.12 with [uv](https://docs.astral.sh/uv/), Node.js ≥ 18, a Supabase
+project with the `vector` extension, and an [NVIDIA API key](https://build.nvidia.com).
+Composio (Google Calendar) and LangSmith are optional.
+
 ```bash
 git clone https://github.com/prasadgt007/project-baymax.git
 cd project-baymax
-uv sync                       # backend deps into .venv
+uv sync
 cd frontend && npm install && cd ..
+cp .env.example .env          # fill in your keys
 ```
 
-### 2. Configure environment
-Copy the example and fill in your keys:
-```bash
-cp .env.example .env
-```
 | Variable | Required | Purpose |
 |---|---|---|
-| `NVIDIA_API_KEY` | ✅ | LLM (`meta/llama-3.1-70b-instruct`) + embeddings (`nv-embedqa-e5-v5`) |
-| `SUPABASE_DB_URI` | ✅ | Postgres connection string (pooler, port 6543) |
-| `COMPOSIO_API_KEY` / `COMPOSIO_USER_ID` | ⛅ | Google Calendar sync (optional but recommended) |
-| `LANGCHAIN_TRACING_V2` / `LANGCHAIN_API_KEY` / `LANGCHAIN_PROJECT` | ⛅ | LangSmith tracing (optional) |
-| `NGROK_AUTHTOKEN` | ⛅ | Only for sharing via `npm run share` |
+| `NVIDIA_API_KEY` | Yes | LLM (`meta/llama-3.1-70b-instruct`) and embeddings (`nv-embedqa-e5-v5`) |
+| `SUPABASE_DB_URI` | Yes | Postgres connection string |
+| `COMPOSIO_API_KEY`, `COMPOSIO_USER_ID` | Optional | Google Calendar sync |
+| `LANGCHAIN_TRACING_V2`, `LANGCHAIN_API_KEY`, `LANGCHAIN_PROJECT` | Optional | LangSmith tracing |
 
-### 3. Set up the database (Supabase SQL editor)
-Enable pgvector, then run the migrations in `db/`:
-```sql
-create extension if not exists vector;
-```
-Run these files in the Supabase SQL editor (in order):
-`db/supabase_schema.sql` → `db/migration_patient_documents.sql` → `db/migration_slots.sql`
+**Database:** in the Supabase SQL editor, run `create extension if not exists vector;`, then
+`db/supabase_schema.sql` → `db/migration_patient_documents.sql` → `db/migration_slots.sql`.
+Seed 14 days of appointment slots:
 
-Then seed appointment slots for the next 14 days (relative to today):
 ```bash
 uv run python scripts/setup_hospital_slots.py
 ```
 
-### 4. (Optional) Verify Composio / Google Calendar
+**Start:**
+
 ```bash
-uv run python scripts/check_composio.py
+uv run uvicorn server:app --port 8000      # terminal 1
+cd frontend && npm run dev                 # terminal 2 → http://localhost:3000
 ```
+
+Log in as a patient with demo ID `P001` or `P002`, or switch to **Hospital Staff** with any staff ID
+(e.g. `E001`). Try "I've had a headache for two days", "What did my last blood test say?", or
+"Book an appointment".
 
 ---
 
-## Run
+## Repository layout
 
-**Backend** (terminal 1):
-```bash
-uv run uvicorn server:app --port 8000
 ```
-**Frontend** (terminal 2):
-```bash
-cd frontend && npm run dev      # opens http://localhost:3000
-```
-Open **http://localhost:3000**.
-
----
-
-## Using the app
-- **As a patient:** log in with a demo ID — `P001` (Chester V) or `P002` (John Doe). Try:
-  - *"I've had a headache for two days"* → it asks a follow-up first, then suggests remedies.
-  - *"What did my last blood test say?"* → RAG lookup over your records.
-  - *"Book an appointment"* → pick a slot chip → confirmed + added to Google Calendar.
-  - *"Cancel my 3pm"* / *"Reschedule to 11am"* → DB and calendar stay in sync.
-- **As hospital staff:** toggle **Hospital Staff**, enter any staff ID (e.g. `E001`). Upload a PDF
-  to a patient and view their pre-consultation brief.
-
----
-
-## Project layout
-```
-server.py                  FastAPI app (endpoints + RBAC)
-database_mcp_server.py     MCP stdio server: all Supabase/pgvector access
-baymax/                    the agent
+server.py                  FastAPI app (endpoints and role checks)
+database_mcp_server.py     MCP server: all Supabase and pgvector access
+baymax/
   graph.py                 LangGraph (agent → compliance → END)
-  nodes.py                 the DeepAgent node + compliance node
-  tools.py                 the 7 LangChain tools (bound per patient)
-  mcp_client.py            sync wrappers that call the MCP server
-  calendar_client.py       Composio Google Calendar helper
+  nodes.py                 DeepAgent node and compliance node
+  tools.py                 the 7 tools, bound per patient
+  mcp_client.py            wrappers that call the MCP server
+  calendar_client.py       Google Calendar via Composio
   briefs.py                pre-consultation brief generator
   skills.md                the agent's system prompt
-  models.py                state + domain models
-db/                        SQL schema & migrations
-scripts/                   setup_hospital_slots.py, check_composio.py
+  models.py                state and domain models
+db/                        SQL schema and migrations
+scripts/                   slot seeding, demo reset, calendar check
 frontend/                  React + Vite app
-docs/                      journal + codebase guide + recommendations
-workshop/                  presenter notes for the workshop
-review/                    code + security review
-.agents/skills/            Agent Skills (dev tooling)
+docs/                      design write-ups (below)
 ```
 
----
+## Docs
 
-## Troubleshooting
-- **`SUPABASE_DB_URI not set`** — your `.env` isn't filled in, or you're not running from the repo
-  root.
-- **No slots appear** — run `scripts/setup_hospital_slots.py` (it seeds relative to *today*).
-- **Calendar events don't appear on *your* calendar** — they're created on the **Composio-connected
-  Google account**, which may differ from your personal one. Run `scripts/check_composio.py` to see
-  which account is connected.
-- **First response is slow** — the agent makes several model calls per turn and runs RAG on every
-  message (a deliberate demo choice). Booking is the heaviest turn. See
-  [docs/RECOMMENDATIONS.md](docs/RECOMMENDATIONS.md) for latency options.
-- **Windows** — this project is developed on Windows; the backend uses UTF-8 + a clean-thread
-  workaround for the asyncio/MCP interaction. Use `uv run …` so the correct venv Python is used.
+- [Architecture decision: single DeepAgent vs. multi-agent](docs/architecture-decision.md)
+- [RAG with Supabase + pgvector, and the auth roadmap](docs/rag-and-data-model.md)
+- [Codebase guide: one message traced through the system](docs/codebase-guide.md)
 
----
-
-## Learn more
-- **[docs/CODEBASE_GUIDE.md](docs/CODEBASE_GUIDE.md)** — a beginner-friendly walkthrough of how a
-  message flows through the code (assumes only LangChain/LangGraph basics).
-- **[docs/PROJECT_JOURNAL.md](docs/PROJECT_JOURNAL.md)** — the development story & decisions.
-- **[workshop/](workshop/)** — why single-DeepAgent over multi-agent, and how RAG works.
-- **[review/](review/)** — full code & security review.
+*Baymax does not replace clinical judgment. Medical replies end with a disclaimer added in code.*

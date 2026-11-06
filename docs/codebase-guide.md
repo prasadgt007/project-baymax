@@ -64,7 +64,7 @@ This is the heart. Each turn it:
 ### Step 4 — The tool calls the MCP server (`baymax/tools.py` → `baymax/mcp_client.py`)
 `search_patient_records` calls `search_patient_documents_mcp(...)` and `search_interactions_mcp(...)`.
 Each wrapper spawns the MCP server as a subprocess, calls the tool over stdio, and returns parsed
-JSON. (One subprocess **per call** — simple, but a latency cost; see RECOMMENDATIONS.)
+JSON. (One subprocess **per call** — simple, but a latency cost.)
 
 ### Step 5 — The actual DB / RAG (`database_mcp_server.py`)
 The MCP tool embeds the query with NVIDIA `nv-embedqa-e5-v5` (1024-d) and runs:
@@ -111,7 +111,7 @@ remembering to add it.
   cancel tool is written defensively (resolve by time) because LLMs fumble UUIDs across turns.
 - **`skills.md` is the brain.** Most "behavior" changes (triage, tone, refusals, not leaking IDs)
   are prompt edits there, not code.
-- **No auth yet.** `patient_id`/`role` are trusted from the client. See `review/REPORT.md`.
+- **No auth yet.** `patient_id`/`role` are trusted from the client. See "Known limitations" in the README.
 
 ---
 

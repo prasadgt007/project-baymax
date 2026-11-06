@@ -89,7 +89,7 @@ cache embeddings; we traded a little efficiency for clarity. *(Latency work is t
 
 ## 5. What Supabase unlocks next (roadmap)
 
-> **Current state (be honest in the talk):** Baymax has **no authentication yet** — the client
+> **Current state:** Baymax has **no authentication yet** — the client
 > sends a `patient_id` and a `role` string that the server trusts. RLS is *enabled* on the tables
 > but has *no policies*, so it isn't enforcing anything yet. The items below are the planned path.
 

@@ -17,3 +17,12 @@ node_modules/
 **/node_modules/
 dist/
 build/
+
+# Local working notes and dev tooling (kept out of the public repo)
+.agents/
+review/
+workshop/
+docs/PROJECT_JOURNAL.md
+docs/RECOMMENDATIONS.md
+share.ps1
+transcript*.txt
